@@ -228,6 +228,27 @@ mod tests {
         assert_eq!(Named::of_extra("::v1").unwrap().naming(), Naming::Identifier);
     }
 
+    /// A policy of the older kind as the kernel reports it: its version
+    /// byte is zero, and the eight bytes after its first four are the
+    /// descriptor the key under it is named by. The table is not where that
+    /// comes from, since it names no descriptor at all.
+    #[test]
+    fn the_older_kind_of_policy_carries_its_descriptor_in_the_kernel_s_answer() {
+        // What FS_IOC_GET_ENCRYPTION_POLICY fills in after its length word:
+        // version, contents mode, filenames mode, flags, then the name.
+        let mut body = [0u8; 24];
+        body[0] = 0; // FSCRYPT_POLICY_V1
+        body[1] = 1; // AES-256-XTS
+        body[2] = 4; // AES-256-CTS
+        body[4..12].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let mut raw = [0u8; 8 + 24];
+        raw[..8].copy_from_slice(&24u64.to_ne_bytes());
+        raw[8..].copy_from_slice(&body);
+        // The same offsets `policy_of` reads.
+        assert_eq!(raw[8], 0, "the version is the first byte after the length");
+        assert_eq!(&raw[12..20], &[1, 2, 3, 4, 5, 6, 7, 8], "and the descriptor is four bytes in");
+    }
+
     /// The descriptor the older kind of policy names a key by is the eight
     /// bytes the phone chose, taken as they lie.
     #[test]

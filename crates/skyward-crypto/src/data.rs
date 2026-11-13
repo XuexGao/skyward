@@ -318,6 +318,36 @@ fn entries_for_data() -> Result<Vec<Entry>> {
     skyward_block::fstab::read(MOUNT)
 }
 
+/// How the phone names the keys for the files of its data partition. Every
+/// key let into the partition is named the same way, whether it holds the
+/// files of no user, of one user's data readable before they sign in, or of
+/// one user's own files.
+///
+/// The name is the one the phone itself used, and the kernel can be asked
+/// what that is: the directories under the data partition already carry
+/// policies, and a policy of the older kind holds the descriptor its keys
+/// are named by. The partition's own top has no policy on a phone that
+/// encrypts each user's files only, so the directories below it are what is
+/// asked, and the table is the fallback for a partition with none of them.
+fn naming() -> Result<crate::fscrypt::Naming> {
+    for probe in POLICIES {
+        let at = Path::new(probe);
+        if let Some(crate::fscrypt::Policy { version: 0, descriptor: Some(descriptor) }) =
+            crate::fscrypt::policy_of(at).with_context(|| format!("read how {probe} is encrypted"))?
+        {
+            return Ok(crate::fscrypt::Naming::Descriptor(descriptor));
+        }
+    }
+    let entry = entries_for_data()?.into_iter().next().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
+    naming_of(&entry)
+}
+
+/// Directories under the data partition that the phone encrypts, asked in
+/// turn for the policy the keys under it are named by. Each is a place the
+/// phone itself made, so one of them is there on any phone that encrypts
+/// its files at all.
+const POLICIES: [&str; 3] = ["/data/misc", "/data/system", "/data/data"];
+
 /// Let in the key for the files that belong to no one user. Until it is
 /// in, most of what the data partition holds reads as scrambled names.
 ///
@@ -332,7 +362,7 @@ fn open_shared(service: &dyn KeyService) -> Result<Option<[u8; crate::fscrypt::N
     };
     let wrapped = crate::fscrypt::hardware_wrapped(mode.trim());
     let raw = hardware_key(service, Path::new(SHARED_KEY), wrapped)?;
-    let name = crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;
+    let name = crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming()?)?;
     let recorded = crate::fscrypt::recorded_name(Path::new(SHARED_NAME))?;
     if name != recorded {
         anyhow::bail!("the key in {SHARED_KEY} is not the one {SHARED_NAME} names");
@@ -373,7 +403,7 @@ fn open_users(service: &dyn KeyService) -> Result<Vec<u32>> {
     for user in &users {
         let dir = Path::new(USER_KEYS).join("de").join(user.to_string());
         let raw = hardware_key(service, &dir, wrapped)?;
-        crate::fscrypt::add_key(Path::new(MOUNT), &raw, wrapped)?;
+        crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming()?)?;
     }
     Ok(users)
 }
@@ -586,8 +616,7 @@ fn open_user_files(service: &dyn KeyService, user: u32, credential: Option<&[u8]
     // Letting the key in names it the way the phone's own table names it:
     // the phones that encrypt each user's files the older way named a
     // descriptor for it, and the newer ones leave the name to the kernel.
-    let entry = entries_for_data()?.into_iter().next().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
-    crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming_of(&entry)?)?;
+    crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming()?)?;
     if user == OWNER {
         show_owner_storage()?;
     }
