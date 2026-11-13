@@ -46,13 +46,16 @@ pub struct Message {
 impl Message {
     /// A call to `interface`, opened with the name the far side checks
     /// before it looks at anything the method itself takes.
+    ///
+    /// The name is written the way the older layout writes it: the bytes and
+    /// their terminator, and nothing after them. The far side reads exactly
+    /// that many bytes before it reads the method's own arguments, so any
+    /// padding written here would put every argument out by as many bytes as
+    /// were added, and the lengths they carry would come out as nonsense.
     pub fn call(interface: &str) -> Message {
         let mut m = Message::default();
         m.data.extend_from_slice(interface.as_bytes());
         m.data.push(0);
-        while !m.data.len().is_multiple_of(4) {
-            m.data.push(0);
-        }
         m
     }
 
