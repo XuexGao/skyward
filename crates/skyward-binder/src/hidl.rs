@@ -528,17 +528,20 @@ mod tests {
         read.status().unwrap();
         assert_eq!(read.number().unwrap(), 0x0102_0304_0506_0708);
 
-        // One word after the status puts the next number four bytes in, so
-        // the room left of the word before it goes by first.
+        // Status and two words make twelve bytes, which is not a boundary
+        // of eight; the four bytes that are left of the word before the
+        // number are padding, and the number follows them.
         let shifted = reply(|p| {
             p.extend_from_slice(&1u32.to_le_bytes());
+            p.extend_from_slice(&2u32.to_le_bytes());
             p.extend_from_slice(&[0; 4]);
             p.extend_from_slice(&7u64.to_le_bytes());
         });
         let mut read = Answer::new(&shifted);
         read.status().unwrap();
-        assert_eq!(read.count().unwrap(), 1, "the word before the number");
-        assert_eq!(read.number().unwrap(), 7, "and the number after it");
+        assert_eq!(read.count().unwrap(), 1, "the first word");
+        assert_eq!(read.count().unwrap(), 2, "the second");
+        assert_eq!(read.number().unwrap(), 7, "the number after the room left of a word");
     }
 
     #[test]
