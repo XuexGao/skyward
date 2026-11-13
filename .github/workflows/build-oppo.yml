@@ -229,6 +229,24 @@ jobs:
             --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
             --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
           echo "name=$name" >> "$GITHUB_OUTPUT"
+      # What the image has to have for the phone's data partition to open at
+      # all: the device configuration inside it must be the one this build
+      # made, with the programs that reach the phone's secure world in it.
+      - name: Check the image carries the device it was built for
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+          DEVICE: ${{ matrix.device }}
+        run: |
+          set -euo pipefail
+          img="out/$NAME.img"
+          tools/skyward-pack list "$img" > listing.txt
+          grep -q " skyward/device.toml$" listing.txt
+          tools/skyward-pack cat "$img" skyward/device.toml > device.toml
+          cmp device.toml "devices/$DEVICE.toml"
+          grep -q 'keymaster@3.0-service' device.toml
+          grep -q 'gatekeeper@1.0-service' device.toml
+          grep -q 'qseecomd' device.toml
+          echo "$DEVICE: the image carries its device, with the programs that reach the secure world"
       - name: Zip the image
         working-directory: out
         env:
