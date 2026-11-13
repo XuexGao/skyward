@@ -169,6 +169,15 @@ impl Panel {
                     self.raw.1 = v;
                     self.moved = true;
                 }
+                // A capacitive back key sits on the panel's own device, so its
+                // presses arrive on the stream read here. The device was taken
+                // in as the panel and is therefore not one of the buttons, and
+                // BTN_TOUCH shares EV_KEY but maps to no key of ours.
+                EventSummary::Key(_, code, value @ (0 | 1)) => {
+                    if let Some(k) = key_of(code) {
+                        out.push(Event::Key(k, value == 1));
+                    }
+                }
                 _ => {}
             }
         }
