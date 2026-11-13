@@ -79,3 +79,10 @@ logs = [
     "/data/vendor/tombstones",
     "/data/vendor/wlan_logs",
 ]
+
+# What the image has to have for this phone's display to come up, beyond the
+# stock recovery: the kernel's DTS leaves qcom,mdss_dsi@0's ext_byte0/byte1 and
+# ext_pixel0/1 clocks pointing at the DSI PLLs instead of the gcc-mdss wrapper,
+# so clk_set_rate answers -EINVAL and the panel stays dark once anything blanks
+# it. The panel node also lacks the mi,* brightness maxima the UI reads.
+# Both are dealt with in the kernel tree, not here.
