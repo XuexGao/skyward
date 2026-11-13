@@ -1175,6 +1175,9 @@ pub mod fb {
                 return Err(std::io::Error::last_os_error()).context("map the frame buffer");
             }
             let doubled = var.yres_virtual >= var.yres * 2 && fix.ypanstep > 0;
+            // The half the panel is not showing is the one the first frame
+            // goes into, so that it is drawn out of sight and then shown.
+            let back = if !doubled || var.yoffset < var.yres { 1 } else { 0 };
             let summary = format!(
                 "{path}, {}x{} at {} bpp on {} bytes to the row{}, pixels {}",
                 var.xres,
@@ -1185,7 +1188,7 @@ pub mod fb {
                 order.iter().map(|b| [".", "r", "g", "b", "a"][(*b as usize).min(4)]).collect::<String>()
             );
             eprintln!("display {summary}");
-            Ok(FbSurface { file, map: map.cast(), len, var, stride, w: var.xres, h: var.yres, order, doubled, back: 0, on: true, summary })
+            Ok(FbSurface { file, map: map.cast(), len, var, stride, w: var.xres, h: var.yres, order, doubled, back, on: true, summary })
         }
 
         /// Blank the display, or light it again; the driver may have no

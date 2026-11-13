@@ -34,12 +34,20 @@ pub struct Entry {
     pub partition: String,
     /// Where the phone's own table mounts it.
     pub mount_point: String,
+    /// The path the table gives the partition, which the phone's own
+    /// recovery uses. It is the one to read through where it is there, so a
+    /// phone whose partitions are reached another way keeps working.
+    pub device_path: String,
 }
 
 impl Entry {
-    /// The block device the partition is, as the phone's own recovery
-    /// names it.
+    /// The block device the partition is: the path the phone's own table
+    /// gives it, or else the one its name reaches it by.
     pub fn device(&self) -> PathBuf {
+        let named = Path::new(&self.device_path);
+        if named.exists() {
+            return named.to_path_buf();
+        }
         Path::new(BY_NAME).join(&self.partition)
     }
 
@@ -76,7 +84,12 @@ pub fn entries() -> Result<Vec<Entry>> {
                 continue;
             }
             let Some(partition) = Path::new(device).file_name().and_then(|n| n.to_str()) else { continue };
-            out.push(Entry { base: base.to_string(), partition: partition.to_string(), mount_point: point.to_string() });
+            out.push(Entry {
+                base: base.to_string(),
+                partition: partition.to_string(),
+                mount_point: point.to_string(),
+                device_path: device.to_string(),
+            });
         }
         if !out.is_empty() {
             break;
@@ -221,13 +234,14 @@ mod tests {
                 continue;
             }
             let partition = Path::new(device).file_name().unwrap().to_str().unwrap().to_string();
-            out.push(Entry { base: base.to_string(), partition, mount_point: point.to_string() });
+            out.push(Entry { base: base.to_string(), partition, mount_point: point.to_string(), device_path: device.to_string() });
         }
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].base, "system");
         assert_eq!(out[1].base, "vendor");
         assert_eq!(out[1].partition, "oem", "the vendor partition is the phone's own oem one");
-        assert_eq!(out[1].device(), Path::new("/dev/block/by-name/oem"));
+        assert_eq!(out[1].partition, "oem");
+        assert_eq!(out[1].device_path, "/dev/block/platform/soc/7824900.sdhci/by-name/oem");
         assert_eq!(out[1].recovery_name(), "vendor_a");
     }
 }

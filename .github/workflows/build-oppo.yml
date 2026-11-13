@@ -90,7 +90,7 @@ jobs:
             # The devices whose stock recovery is an image of its own, as the
             # phones whose maker hands out no package a tool can read.
             names=$(for f in devices/*.toml; do if grep -q '^image = ' "$f"; then basename -s .toml "$f"; fi; done)
-            echo "devices=$(printf '%s\n' "$names" | jq -R -s 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+            echo "devices=$(printf '%s\n' "$names" | jq -R -s -c 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
           fi
 
   kernel:
