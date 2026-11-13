@@ -258,19 +258,18 @@ fn write_parameters(call: &mut Message, params: &[(u32, Value<'_>)]) {
 /// numbers it says, then the time as a structure of its own, then the
 /// signature over all of it.
 fn token_bytes(note: &Token) -> Vec<u8> {
+    // The note is the secure world's own structure, read the same way
+    // whether it is checked or handed over: the first three numbers in the
+    // order this machine uses, and the kind of answer and the time in the
+    // order the network uses. It is packed, so nothing is padded, and the
+    // fields follow one another exactly.
     let mut out = Vec::new();
+    out.push(0u8);
     out.extend_from_slice(&note.challenge.to_le_bytes());
     out.extend_from_slice(&note.user.to_le_bytes());
     out.extend_from_slice(&note.authenticator.to_le_bytes());
-    out.extend_from_slice(&(note.kind as u32).to_le_bytes());
-    // The time is a structure of its own: that it is there, how long it is,
-    // then the time itself, on a boundary of eight.
-    out.extend_from_slice(&1u32.to_le_bytes());
-    out.extend_from_slice(&8u32.to_le_bytes());
-    while !out.len().is_multiple_of(8) {
-        out.push(0);
-    }
-    out.extend_from_slice(&note.when.to_le_bytes());
+    out.extend_from_slice(&(note.kind as u32).to_be_bytes());
+    out.extend_from_slice(&note.when.to_be_bytes());
     out.extend_from_slice(&note.mac);
     out
 }
@@ -331,28 +330,47 @@ mod tests {
         assert_eq!(u32::from_le_bytes(values[at + 16..at + 20].try_into().unwrap()), BLOCK_MODE_GCM);
     }
 
+    /// The note is the secure world's own packed structure, and the key
+    /// service checks its signature over exactly these bytes: the version,
+    /// three numbers in this machine's order, the kind of answer and the
+    /// time in the network's order, then the signature. Nothing is padded.
     #[test]
-    fn a_note_is_written_with_its_time_a_structure_of_its_own() {
-        let note = Token { challenge: 1, user: 2, authenticator: 3, kind: 1, when: 4, mac: vec![0xAB; 32] };
+    fn a_note_is_written_as_the_secure_world_holds_it() {
+        let note = Token {
+            challenge: 0x0807_0605_0403_0201,
+            user: 0x1817_1615_1413_1211,
+            authenticator: 0x2827_2625_2423_2221,
+            kind: 1,
+            when: 0x3837_3635_3433_3231,
+            mac: vec![0xAB; 32],
+        };
         let raw = token_bytes(&note);
-        // Four numbers, the time's own two words, the time on a boundary of
-        // eight, and the signature.
-        assert_eq!(raw.len(), 16 + 8 + 8 + 32, "and no room left before the time");
-        assert_eq!(u64::from_le_bytes(raw[0..8].try_into().unwrap()), 1);
-        assert_eq!(u32::from_le_bytes(raw[16..20].try_into().unwrap()), 1, "the time is there");
-        assert_eq!(u32::from_le_bytes(raw[20..24].try_into().unwrap()), 8, "and eight bytes long");
-        assert_eq!(u64::from_le_bytes(raw[24..32].try_into().unwrap()), 4);
-        assert_eq!(&raw[32..], &[0xAB; 32]);
+        assert_eq!(raw.len(), 1 + 8 + 8 + 8 + 4 + 8 + 32, "packed, and no room taken before anything");
+        assert_eq!(raw[0], 0, "the only layout there is");
+        assert_eq!(u64::from_le_bytes(raw[1..9].try_into().unwrap()), note.challenge, "in this machine's order");
+        assert_eq!(u64::from_le_bytes(raw[9..17].try_into().unwrap()), note.user);
+        assert_eq!(u64::from_le_bytes(raw[17..25].try_into().unwrap()), note.authenticator);
+        assert_eq!(u32::from_be_bytes(raw[25..29].try_into().unwrap()), 1, "the kind of answer, in the network's order");
+        assert_eq!(u64::from_be_bytes(raw[29..37].try_into().unwrap()), note.when, "and so is the time");
+        assert_eq!(&raw[37..], &[0xAB; 32]);
     }
 
-    /// A note written when the numbers before the time leave it off a
-    /// boundary of eight takes the room it needs before it.
+    /// What is written is what is read back: the two halves of the note
+    /// agree, so a note taken from the credential service is handed to the
+    /// key service unchanged.
     #[test]
-    fn a_note_s_time_goes_on_a_boundary_of_eight() {
-        let note = Token { challenge: 1, user: 2, authenticator: 3, kind: 1, when: 4, mac: vec![0xCD; 32] };
-        let raw = token_bytes(&note);
-        let at = raw.len() - 32 - 8;
-        assert_eq!(at % 8, 0, "the time starts on a boundary of eight");
-        assert_eq!(u64::from_le_bytes(raw[at..at + 8].try_into().unwrap()), 4);
+    fn a_note_read_from_the_credential_service_is_written_out_as_it_came() {
+        let raw: Vec<u8> = [
+            vec![0u8],
+            7i64.to_le_bytes().to_vec(),
+            0x253c_22c3_acbb_a741u64.to_le_bytes().to_vec(),
+            9i64.to_le_bytes().to_vec(),
+            1i32.to_be_bytes().to_vec(),
+            1_700_000_000i64.to_be_bytes().to_vec(),
+            vec![0x5A; 32],
+        ]
+        .concat();
+        let note = Token::of(&raw).expect("a note the secure world wrote");
+        assert_eq!(token_bytes(&note), raw, "handed over byte for byte");
     }
 }
