@@ -42,7 +42,13 @@ pub fn start(services: &[Service], libraries: Option<&Path>) -> Result<()> {
     let known = ueventd::accounts(&ueventd::PASSWD_FILES.iter().chain(&ueventd::GROUP_FILES).copied().collect::<Vec<_>>());
     for s in services {
         if !Path::new(&s.path).is_file() {
-            bail!("{} is missing; is its partition mounted?", s.path);
+            // One program that is not there, as one of the installed
+            // system's is on a phone whose system did not mount, must not
+            // take the others with it: the ones that do start may be all
+            // the recovery needs to be usable, and the reason goes where
+            // every other reason does.
+            skyward_sys::kmsg(&format!("{} is missing; is its partition mounted?", s.path))?;
+            continue;
         }
         let mut s = s.clone();
         if let Some(dir) = libraries {

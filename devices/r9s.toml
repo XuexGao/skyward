@@ -34,6 +34,18 @@ version = "lineage-22.1-20260715"
 image = "https://github.com/BlueyfishReleases/R9s/releases/download/lineage-22.1-20260715-UNOFFICIAL-R9s/recovery.img"
 recovery = "1d021bdc07d5453b119b6e570d1ac9211c9eb357ec8cd79dc653465d8a081d63"
 
+# The directory the phone's hardware services register with. A recovery
+# carries none of it — it is on the installed system's system partition,
+# which the recovery mounts at /mnt/system — and without it nothing that
+# speaks the older hardware interface can be found at all: every look-up
+# answers that the service is not there.
+[[service]]
+path = "/mnt/system/system/bin/hwservicemanager"
+libraries = ["/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+ready_property = "hwservicemanager.ready"
+user = "root"
+groups = ["root"]
+
 # The secure world is reached from the system through these, and without
 # them the data partition cannot be opened: the daemon below registers the
 # listeners it calls back through, and the two services above it hold the
