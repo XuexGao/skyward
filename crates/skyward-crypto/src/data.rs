@@ -176,14 +176,15 @@ pub fn unmap() -> Result<()> {
     }
 }
 
-/// How the phone names the key for the files under `mount`: by the
-/// descriptor it chose, where its files are encrypted the older way, and by
-/// the identifier the kernel works out, where they are not.
-fn naming_of(mount: &Path) -> Result<crate::fscrypt::Naming> {
-    Ok(match crate::fscrypt::policy_of(mount).with_context(|| format!("read how {} is encrypted", mount.display()))? {
-        Some(crate::fscrypt::Policy { descriptor: Some(descriptor), .. }) => crate::fscrypt::Naming::Descriptor(descriptor),
-        _ => crate::fscrypt::Naming::Identifier,
-    })
+/// How the phone names the keys for the files of its data partition, as its
+/// own table says: the version of the policy there, and the descriptor it
+/// names. The table is where vold takes it from too, so the names here are
+/// the ones the phone itself used.
+fn naming_of(entry: &Entry) -> Result<crate::fscrypt::Naming> {
+    let said = entry.extra("fileencryption").with_context(|| {
+        format!("the phone's own table says nothing about how {} is encrypted", entry.mount_point)
+    })?;
+    Ok(crate::fscrypt::Named::of_extra(said).with_context(|| format!("read how {} is encrypted", entry.mount_point))?.naming())
 }
 
 /// Show the owner's shared storage at /sdcard; shown already, it stays.
@@ -310,6 +311,12 @@ const FILE_MODE: &str = "/data/unencrypted/mode";
 
 /// Where the phone keeps each user's own keys.
 const USER_KEYS: &str = "/data/misc/vold/user_keys";
+
+/// The phone's own table's entries for the data partition, the first the
+/// one its filesystem is mounted by.
+fn entries_for_data() -> Result<Vec<Entry>> {
+    skyward_block::fstab::read(MOUNT)
+}
 
 /// Let in the key for the files that belong to no one user. Until it is
 /// in, most of what the data partition holds reads as scrambled names.
@@ -576,10 +583,11 @@ fn open_user_files(service: &dyn KeyService, user: u32, credential: Option<&[u8]
         true => service.ephemeral_storage_key(&raw).with_context(|| format!("make the key in {} usable now", dir.display()))?,
         false => raw,
     };
-    // Letting the key in names it the way the phone's own files name it: the
-    // phones that encrypt each user's files the older way chose a descriptor
-    // for it, and one the newer way wants the kernel to work the name out.
-    crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming_of(Path::new(MOUNT))?)?;
+    // Letting the key in names it the way the phone's own table names it:
+    // the phones that encrypt each user's files the older way named a
+    // descriptor for it, and the newer ones leave the name to the kernel.
+    let entry = entries_for_data()?.into_iter().next().with_context(|| format!("the phone's own table says nothing about {MOUNT}"))?;
+    crate::fscrypt::add_key_named(Path::new(MOUNT), &raw, wrapped, naming_of(&entry)?)?;
     if user == OWNER {
         show_owner_storage()?;
     }

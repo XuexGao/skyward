@@ -66,6 +66,51 @@ pub fn add_key_named(mount: &Path, raw: &[u8], wrapped: bool, naming: Naming) ->
     Ok(name)
 }
 
+/// How the phone's own table says the files under a mount point are
+/// encrypted: the version of the policy, and the descriptor its keys are
+/// named by under the older kind, which the table names itself.
+///
+/// The table is where the version comes from, and not the mounted
+/// filesystem: a directory that is not encrypted under a policy of its own,
+/// as `/data` itself is on a phone that encrypts each user's files only,
+/// has none to read, and the keys for the directories below it are named by
+/// what the table says regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Named {
+    pub version: u8,
+    pub descriptor: Option<[u8; DESCRIPTOR_BYTES]>,
+}
+
+impl Named {
+    /// What `fileencryption=` says in the phone's own table, as
+    /// `aes-256-xts:aes-256-cts:v1` or `::v1`.
+    pub fn of_extra(said: &str) -> Result<Named> {
+        // The version is the last part, and the parts after it are flags
+        // joined on with a plus, as `::v2+inlinecrypt_optimized` writes them.
+        let version = said
+            .split(':')
+            .find_map(|part| {
+                let number = part.strip_prefix('v')?.split('+').next()?;
+                number.parse::<u8>().ok()
+            })
+            .with_context(|| format!("{said} does not name a policy version"))?;
+        // The table names the cipher and the modes, and not the descriptor:
+        // a descriptor of nothing is what the kernel takes when the key is
+        // to be named by one it works out itself.
+        Ok(Named { version, descriptor: None })
+    }
+
+    /// How a key is named under this policy: by the descriptor the table
+    /// named, where it named one, and otherwise by what the kernel works out
+    /// from the key itself.
+    pub fn naming(self) -> Naming {
+        match self.descriptor {
+            Some(d) => Naming::Descriptor(d),
+            None => Naming::Identifier,
+        }
+    }
+}
+
 /// The way the files under `dir` are encrypted, as far as the kernel says:
 /// the version of the policy, and the descriptor that names its key where
 /// the policy is the older kind.
@@ -170,6 +215,18 @@ pub fn recorded_name(path: &Path) -> Result<[u8; NAME_BYTES]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The version of the policy is the phone's table's to say, as
+    /// `fileencryption=::v1` or `aes-256-xts:aes-256-cts:v2`.
+    #[test]
+    fn the_table_says_which_version_of_policy_it_uses() {
+        assert_eq!(Named::of_extra("::v1").unwrap(), Named { version: 1, descriptor: None });
+        assert_eq!(Named::of_extra("aes-256-xts:aes-256-cts:v2").unwrap().version, 2);
+        assert_eq!(Named::of_extra("aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized").unwrap().version, 2);
+        assert!(Named::of_extra("aes-256-xts").is_err(), "no version named");
+        // No table names a descriptor, so the kernel works the name out.
+        assert_eq!(Named::of_extra("::v1").unwrap().naming(), Naming::Identifier);
+    }
 
     /// The descriptor the older kind of policy names a key by is the eight
     /// bytes the phone chose, taken as they lie.
