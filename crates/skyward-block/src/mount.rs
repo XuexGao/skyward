@@ -79,7 +79,9 @@ mod sys {
 
     /// Mount `device` read-only at `target` with the first of [`FILESYSTEMS`]
     /// the kernel accepts, and return its name. Only the kernel's answers for
-    /// "not this filesystem" move on to the next one.
+    /// "not this filesystem" move on to the next one: a kernel that cannot
+    /// read a bundle as one filesystem answers `EIO` as readily as `EINVAL`,
+    /// so both are taken as a refusal rather than the end of the search.
     pub fn mount_ro(device: &Path, target: &Path) -> Result<&'static str> {
         let (src, dst) = (cstr(device)?, cstr(target)?);
         let mut refused = Vec::new();
@@ -90,7 +92,7 @@ mod sys {
             }
             let e = os_error();
             match e.raw_os_error() {
-                Some(libc::EINVAL | libc::ENODEV) => refused.push(format!("{fs}: {e}")),
+                Some(libc::EINVAL | libc::ENODEV | libc::EIO) => refused.push(format!("{fs}: {e}")),
                 _ => {
                     return Err(e).with_context(|| format!("mount {} on {} as {fs}", device.display(), target.display()))
                 }

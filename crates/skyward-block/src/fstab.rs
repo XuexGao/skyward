@@ -100,6 +100,19 @@ pub fn device(entry: &Entry) -> Result<String> {
     anyhow::bail!("neither {path} nor {} is here", by_name.display())
 }
 
+/// The device the phone's own table mounts at `mount_point`, as it is
+/// reachable now. The phones that keep a partition of their own need not
+/// name it what a recovery looks it up by: the metadata partition of the
+/// OPPO phones is `reserve2` to them, and none of them makes a
+/// `/dev/block/by-name/metadata` for anything to find.
+pub fn device_at(mount_point: &str) -> Result<String> {
+    let entry = read(mount_point)?
+        .into_iter()
+        .next()
+        .with_context(|| format!("the phone's own table mounts nothing at {mount_point}"))?;
+    device(&entry)
+}
+
 /// Mount the partition `name` where and as the phone's own table mounts
 /// it, and say where. Whatever shows there already, as what an earlier run
 /// of the recovery service mounted does, is taken as it is.
@@ -124,6 +137,19 @@ mod tests {
 /dev/block/bootdevice/by-name/userdata /data f2fs noatime,discard latemount,wait,fileencryption=aes-256-xts:aes-256-cts:v2,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,quota
 /dev/block/bootdevice/by-name/userdata /data mifs noatime,discard latemount,wait,keydirectory=/metadata/vold/metadata_encryption
 ";
+
+    /// A phone that keeps its metadata on a partition of another name is
+    /// found through its own table, rather than by the name a recovery
+    /// expects: the OPPO phones mount `reserve2` at /metadata and make no
+    /// `/dev/block/by-name/metadata` at all.
+    #[test]
+    fn the_metadata_partition_is_found_by_what_the_phone_mounts_there() {
+        let table = "/dev/block/platform/soc/7824900.sdhci/by-name/reserve2 /metadata ext4 nosuid wait\n";
+        let entry = entries(table).into_iter().next().expect("an entry for /metadata");
+        assert_eq!(entry.mount_point, "/metadata");
+        assert_eq!(Path::new(&entry.device).file_name().unwrap(), "reserve2", "the name the phone gives it");
+        assert!(!names(&entry, "metadata"), "and not the name a recovery looks it up by");
+    }
 
     #[test]
     fn a_mount_point_can_be_named_once_per_filesystem_it_might_hold() {

@@ -71,7 +71,14 @@ fn with_metadata<T>(work: impl FnOnce() -> Result<T>) -> Result<T> {
     if mount::is_mount_point(at)? {
         return work();
     }
-    mount::mount_ro(&Path::new(skyward_block::BY_NAME).join("metadata"), at)?;
+    // The phones that keep this partition of their own may not name it what
+    // a recovery looks it up by, so the phone's own table is asked first,
+    // and the name a recovery expects is the fallback.
+    let device = match skyward_block::fstab::device_at(METADATA) {
+        Ok(device) => Path::new(&device).to_path_buf(),
+        Err(_) => Path::new(skyward_block::BY_NAME).join("metadata"),
+    };
+    mount::mount_ro(&device, at)?;
     let done = work();
     mount::umount(at)?;
     done

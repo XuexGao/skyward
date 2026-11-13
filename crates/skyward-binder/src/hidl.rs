@@ -46,13 +46,16 @@ pub struct Message {
 impl Message {
     /// A call to `interface`, opened with the name the far side checks
     /// before it looks at anything the method itself takes.
+    ///
+    /// The name is written the way the older layout writes it: the bytes and
+    /// their terminator, and nothing after them. The far side reads exactly
+    /// that many bytes before it reads the method's own arguments, so any
+    /// padding written here would put every argument out by as many bytes as
+    /// were added, and the lengths they carry would come out as nonsense.
     pub fn call(interface: &str) -> Message {
         let mut m = Message::default();
         m.data.extend_from_slice(interface.as_bytes());
         m.data.push(0);
-        while !m.data.len().is_multiple_of(4) {
-            m.data.push(0);
-        }
         m
     }
 
@@ -390,9 +393,32 @@ mod tests {
     fn a_call_opens_with_the_interface_name_and_a_terminator() {
         let m = Message::call("a.b@1.0::IC");
         assert_eq!(&m.data[..11], b"a.b@1.0::IC");
-        assert_eq!(m.data.len(), 12, "the name, its terminator, and padding to four");
+        assert_eq!(m.data.len(), 12, "the name and its terminator, and nothing else");
         assert_eq!(m.data[11], 0);
         assert!(m.addresses.is_empty());
+    }
+
+    /// A name whose length leaves a remainder is written as it is, and not
+    /// padded to a whole word: the far side reads exactly the name and its
+    /// terminator before the method's own arguments, so padding here would
+    /// put every one of them out by as many bytes as were added. A name
+    /// whose length is a multiple of four, as `a.b@1.0::IC` is, cannot show
+    /// this, which is why the rest of these tests use longer ones.
+    #[test]
+    fn a_name_whose_length_leaves_a_remainder_is_not_padded() {
+        let m = Message::call("android.hidl.manager@1.0::IServiceManager");
+        // Forty-one bytes of name and its terminator: forty-two, which is
+        // not a whole number of words.
+        assert_eq!(m.data.len(), 42, "the name and its terminator, with no room added");
+        assert_eq!(m.data[41], 0);
+    }
+
+    /// And the arguments after such a name start where the name ends.
+    #[test]
+    fn the_arguments_after_a_name_whose_length_leaves_a_remainder_follow_it() {
+        let mut m = Message::call("android.hidl.manager@1.0::IServiceManager");
+        m.u32(7);
+        assert_eq!(u32::from_le_bytes(m.data[42..46].try_into().unwrap()), 7, "right after the terminator");
     }
 
     #[test]
