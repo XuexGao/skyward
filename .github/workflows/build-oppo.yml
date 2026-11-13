@@ -1,0 +1,278 @@
+name: Build Skyward for OPPO R9s and A57
+
+# Builds the Skyward recovery images for the OPPO R9s (r9s, MSM8953) and the
+# OPPO A57 (a57, MSM8940): the kernel from XuexGao/android_kernel_oppo_msm8937
+# at lineage-22.1-k4.19 with vendor/oppo-recovery.config, the recovery service
+# and packer from this branch, and, on top of the phone's own LineageOS 22.1
+# recovery image, the packed Skyward image.
+#
+# The phone's stock recovery is taken from where the LineageOS builds for it
+# are handed out, checked against the SHA-256 in devices/<codename>.toml.
+on:
+  push:
+    branches: ["oppo-r9s-a57"]
+    paths:
+      - "crates/**"
+      - "devices/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/build-oppo.yml"
+  workflow_dispatch:
+    inputs:
+      device:
+        description: The one device to build for; every device of devices/ when empty
+        required: false
+        default: ""
+      publish_release:
+        description: Publish the images as a release as well as artifacts
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  KERNEL_REPOSITORY: XuexGao/android_kernel_oppo_msm8937
+  KERNEL_REF: lineage-22.1-k4.19
+  # The toolchain the kernel's own CI builds with.
+  CLANG_URL: https://github.com/ZyCromerZ/Clang/releases/download/13.0.1-20230207-release/Clang-13.0.1-20230207.tar.gz
+
+jobs:
+  tools:
+    name: Build the recovery service and the packer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Build the recovery service for the phone
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+      # It runs as a second system's first program, before any library is
+      # there to load.
+      - name: Build the second system's first program, static
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward-system-init --target-dir target/system-init
+      - name: Build the packer
+        run: cargo build --locked --release -p skyward-pack
+      - name: Gather them
+        run: |
+          mkdir tools
+          cp target/aarch64-linux-android/release/skyward target/release/skyward-pack tools/
+          cp target/system-init/aarch64-linux-android/release/system-init tools/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tools
+          path: tools/
+          if-no-files-found: error
+          retention-days: 1
+
+  devices:
+    name: List the devices
+    runs-on: ubuntu-24.04
+    outputs:
+      devices: ${{ steps.list.outputs.devices }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        env:
+          DEVICE: ${{ inputs.device }}
+        run: |
+          if [ -n "$DEVICE" ]; then
+            test -f "devices/$DEVICE.toml"
+            echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
+          else
+            # The devices whose stock recovery is an image of its own, as the
+            # phones whose maker hands out no package a tool can read.
+            names=$(for f in devices/*.toml; do grep -q '^image = ' "$f" && basename -s .toml "$f"; done)
+            echo "devices=$(printf '%s\n' "$names" | jq -R -s 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+          fi
+
+  kernel:
+    name: Kernel for ${{ matrix.device }}
+    needs: [devices]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.devices.outputs.devices) }}
+    env:
+      # The kernel's own CI builds R9s and A57 apart: their touchscreen
+      # drivers (Synaptics S3320, Goodix GT5688) export the same symbols.
+      FRAGMENTS: vendor/mi8953.config vendor/oppo-common.config vendor/oppo-${{ matrix.device }}.config vendor/oppo-no-ksu.config vendor/oppo-recovery.config
+    steps:
+      - name: Make room for the kernel build
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 10
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.KERNEL_REPOSITORY }}
+          ref: ${{ env.KERNEL_REF }}
+          path: kernel
+          fetch-depth: 1
+      - name: Install the build's dependencies
+        run: |
+          set -euo pipefail
+          APT_OPTS="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          PKGS="build-essential bc bison flex libssl-dev libncurses-dev libfl-dev libelf-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi cpio lz4 lzop zstd zip unzip \
+            device-tree-compiler ccache python3 liblz4-tool"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ${APT_OPTS} ${PKGS} \
+            || { sudo apt-get update ${APT_OPTS}; sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ${APT_OPTS} ${PKGS}; }
+      - name: Cache the Clang 13 toolchain
+        id: clang-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/toolchain
+          key: clang-13.0.1-20230207-${{ runner.os }}-${{ runner.arch }}
+      - name: Download the Clang 13 toolchain
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          wget -q "${CLANG_URL}" -O clang.tar.gz
+          mkdir -p "${GITHUB_WORKSPACE}/toolchain"
+          tar xzf clang.tar.gz -C "${GITHUB_WORKSPACE}/toolchain"
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: kernel419-recovery-${{ matrix.device }}
+          restore-keys: |
+            kernel419-recovery-${{ matrix.device }}-
+            kernel419-recovery-
+          max-size: 2G
+      - name: Build Image.gz-dtb
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          export PATH="${GITHUB_WORKSPACE}/toolchain/bin:/usr/lib/ccache:${PATH}"
+          export KBUILD_BUILD_USER="XuexGao"
+          export KBUILD_BUILD_HOST="localhost"
+          export KBUILD_BUILD_TIMESTAMP="$(date -u +'%a %d %b %Y %H:%M:%S UTC')"
+          MAKEFLAGS=(
+            O=out ARCH=arm64 LOCALVERSION=
+            CC="ccache clang"
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          )
+          CONFIGS=(vendor/msm8953-perf_defconfig)
+          for frag in ${FRAGMENTS}; do
+            test -f "arch/arm64/configs/${frag}" || { echo "::error::no such config fragment: ${frag}"; exit 1; }
+            CONFIGS+=("${frag}")
+          done
+          make "${MAKEFLAGS[@]}" -j1 "${CONFIGS[@]}"
+          make "${MAKEFLAGS[@]}" -j"$(nproc --all)" Image.gz-dtb
+          test -f out/arch/arm64/boot/Image.gz-dtb
+          cp out/arch/arm64/boot/Image.gz-dtb "${GITHUB_WORKSPACE}/Image.gz-dtb-${{ matrix.device }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernel-${{ matrix.device }}
+          path: Image.gz-dtb-${{ matrix.device }}
+          if-no-files-found: error
+          retention-days: 1
+
+  recovery:
+    name: Recovery for ${{ matrix.device }}
+    needs: [tools, devices, kernel]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJSON(needs.devices.outputs.devices) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: tools
+          path: tools
+      - uses: actions/download-artifact@v8
+        with:
+          name: kernel-${{ matrix.device }}
+          path: .
+      - name: Make the tools runnable
+        run: chmod +x tools/skyward tools/skyward-pack
+      - name: Read the stock build the recovery is made on
+        id: stock
+        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" >> "$GITHUB_OUTPUT"
+      - name: Restore the stock recovery
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: stock/recovery.img
+          key: stock-recovery-${{ matrix.device }}-${{ steps.stock.outputs.recovery }}
+      - name: Take the stock recovery from where it is handed out
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: tools/skyward-pack stock --config "devices/${{ matrix.device }}.toml" --out stock/recovery.img
+      - name: Check the stock recovery
+        env:
+          RECOVERY: ${{ steps.stock.outputs.recovery }}
+        run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
+      - name: Pack the recovery
+        id: pack
+        env:
+          DEVICE: ${{ matrix.device }}
+          STOCK: ${{ steps.stock.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="$GITHUB_REF_NAME"; else version="${GITHUB_SHA::7}"; fi
+          name="skyward-$version-$DEVICE-$STOCK"
+          mkdir out
+          tools/skyward-pack recovery --stock stock/recovery.img --kernel "Image.gz-dtb-$DEVICE" \
+            --binary tools/skyward --system-init tools/system-init --config "devices/$DEVICE.toml" \
+            --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
+            --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Zip the image
+        working-directory: out
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+        run: zip -9 "$NAME.zip" "$NAME.img"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: out/${{ steps.pack.outputs.name }}.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish the images
+    needs: [recovery]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: skyward-*.zip
+          path: out
+          merge-multiple: true
+      - name: Name the release
+        id: name
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="oppo-$(date -u +%Y%m%d)-$GITHUB_RUN_NUMBER"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "title=Skyward for OPPO R9s and A57 ($tag)" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.name.outputs.tag }}
+          TITLE: ${{ steps.name.outputs.title }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/*.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" out/*.zip --title "$TITLE" --repo "$GITHUB_REPOSITORY" \
+              --notes "Skyward recovery for the OPPO R9s (r9s) and OPPO A57 (a57), built from the 4.19 kernel with vendor/oppo-recovery.config. data 解密尚未接入。"
+          fi

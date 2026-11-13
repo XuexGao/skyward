@@ -88,15 +88,29 @@ pub struct DeviceConfig {
 
 /// The stock build a recovery is made on: the phone maker's full update
 /// package of it, whose recovery partition the recovery is built on top
-/// of, and that partition as it should come out of the package.
+/// of, or the recovery image itself where the maker hands out no package a
+/// tool can read (as OPPO's phones, whose images travel on their own), and
+/// that image as it should come out.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Stock {
     /// The build's version, such as OS4.0.4.0.XPACNXM.
     pub version: String,
-    /// Where the package is downloaded from, over HTTPS.
-    pub package: String,
+    /// Where the full update package is downloaded from, over HTTPS.
+    #[serde(default)]
+    pub package: Option<String>,
+    /// Where the recovery image itself is downloaded from, over HTTPS, on
+    /// phones whose maker hands out no package a tool can read.
+    #[serde(default)]
+    pub image: Option<String>,
     /// The recovery partition's SHA-256, in lowercase hex.
     pub recovery: String,
+}
+
+impl Stock {
+    /// Where the recovery comes from, as a line to print.
+    pub fn source(&self) -> &str {
+        self.package.as_deref().or(self.image.as_deref()).expect("a stock build names where its recovery comes from")
+    }
 }
 
 /// What brings the phone's WLAN up inside a recovery, which loads none of
@@ -572,13 +586,27 @@ impl DeviceConfig {
             }
         }
         if let Some(stock) = &cfg.stock {
-            let name = stock.package.rsplit('/').next().unwrap_or_default();
             ensure!(
-                stock.package.starts_with("https://") && name.ends_with(".zip") && name.contains(&stock.version) && !stock.version.is_empty(),
-                "[stock] package: {} is not an HTTPS address of the full package of {}",
-                stock.package,
+                stock.package.is_some() ^ stock.image.is_some(),
+                "[stock] {}: name either the full update package or the recovery image itself, not both",
                 stock.version
             );
+            if let Some(package) = &stock.package {
+                let name = package.rsplit('/').next().unwrap_or_default();
+                ensure!(
+                    package.starts_with("https://") && name.ends_with(".zip") && name.contains(&stock.version) && !stock.version.is_empty(),
+                    "[stock] package: {package} is not an HTTPS address of the full package of {}",
+                    stock.version
+                );
+            }
+            if let Some(image) = &stock.image {
+                let name = image.rsplit('/').next().unwrap_or_default();
+                ensure!(
+                    image.starts_with("https://") && name.ends_with(".img") && !stock.version.is_empty(),
+                    "[stock] image: {image} is not an HTTPS address of a recovery image of {}",
+                    stock.version
+                );
+            }
             ensure!(
                 stock.recovery.len() == 64 && stock.recovery.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
                 "[stock] recovery: {} is not a SHA-256 in lowercase hex",
@@ -853,7 +881,8 @@ mod tests {
         ] {
             let stock = DeviceConfig::parse(text).unwrap().stock.expect("a stock build to build on");
             assert_eq!(stock.version, version);
-            assert!(stock.package.ends_with(".zip") && stock.package.contains(&format!("/{version}/")), "{}", stock.package);
+            let package = stock.package.as_deref().expect("a full package to take the recovery out of");
+            assert!(package.ends_with(".zip") && package.contains(&format!("/{version}/")), "{package}");
         }
     }
 

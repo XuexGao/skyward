@@ -40,13 +40,23 @@ enum Cmd {
     },
     /// Build a Skyward recovery image on top of the device's stock recovery:
     /// its init, adbd, SELinux policy and libraries stay, the recovery
-    /// service becomes Skyward. The image fills the whole partition and ends
-    /// in an unsigned AVB footer of its own.
+    /// service becomes Skyward. On a phone whose recovery is a whole
+    /// partition of its own the image fills it and ends in an unsigned AVB
+    /// footer; on the older phones whose bootloader verifies the image by
+    /// the signature patch after it, the image keeps that patch and is
+    /// written as it is.
     Recovery {
         /// The device's stock recovery image: the whole partition, as the
-        /// phone or a full update package holds it, ending in its AVB footer.
+        /// phone or a full update package holds it, or, on the older
+        /// phones, the image on its own with the bootloader's signature
+        /// patch after it.
         #[arg(long)]
         stock: PathBuf,
+        /// A kernel to put in place of the stock image's, as the phone's
+        /// own kernel is built from another source; the stock image's
+        /// kernel is kept where none is given.
+        #[arg(long)]
+        kernel: Option<PathBuf>,
         /// Skyward built for the device (aarch64-linux-android).
         #[arg(long)]
         binary: PathBuf,
@@ -105,8 +115,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, binary, system_init, config, font, mono, mono_license, out } => {
-            let size = partition_size(&stock)?;
+        Cmd::Recovery { stock, kernel, binary, system_init, config, font, mono, mono_license, out } => {
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
             // A stock recovery ramdisk has no third-party tree; refuse to build
@@ -116,6 +125,16 @@ fn main() -> Result<()> {
             }
             let read = |p: &PathBuf| std::fs::read(p).with_context(|| format!("read {}", p.display()));
             skyward_config::DeviceConfig::load(&config)?;
+            // A phone whose kernel is built from another source gets it here,
+            // in place of the stock image's; the header's addresses and
+            // command line stay the stock image's. The file may be a boot
+            // image holding a kernel or the kernel itself, as a kernel build
+            // hands it out (Image.gz-dtb).
+            if let Some(kernel) = &kernel {
+                let built = kernel_bytes(kernel)?;
+                ensure!(!built.is_empty(), "{} holds no kernel", kernel.display());
+                img.kernel = built;
+            }
             rd.replace(paths::RECOVERY, read(&binary)?)?;
             // Install scripts look for the commands a stock recovery lacks
             // among its programs, and its unzip there too, a link to ziptool
@@ -150,11 +169,31 @@ fn main() -> Result<()> {
             rd.replace(paths::PROP_DEFAULT, props)?;
             img.ramdisk = rd.encode()?;
             let bytes = img.to_bytes()?;
-            write(&out, &img, &avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?)
+            let whole = if img.header_version() >= 3 {
+                // The recovery fills the whole partition and ends in an
+                // unsigned AVB footer of its own, which an unlocked
+                // bootloader does not verify.
+                let size = partition_size(&stock)?;
+                avb::footed(&bytes, "recovery", size, &Sha256::digest(&bytes))?
+            } else {
+                // The older phones' bootloader reads the signature patch after
+                // the image, which travelled on from the stock image in the
+                // trailer; the image is written as it is, as their maker's own
+                // images are.
+                bytes
+            };
+            write(&out, &img, &whole)
         }
         Cmd::Stock { config, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
-            println!("version={}\npackage={}\nrecovery={}", stock.version, stock.package, stock.recovery);
+            println!("version={}", stock.version);
+            if let Some(package) = &stock.package {
+                println!("package={package}");
+            }
+            if let Some(image) = &stock.image {
+                println!("image={image}");
+            }
+            println!("recovery={}", stock.recovery);
             match out {
                 Some(out) => take_stock_recovery(&stock, &out),
                 None => Ok(()),
@@ -170,11 +209,15 @@ const RECOVERY: &str = "recovery";
 /// on its server, reading only what that partition takes of it, and write it
 /// to `out` once its SHA-256 is the one the configuration names.
 fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path) -> Result<()> {
+    if let Some(image) = &stock.image {
+        return take_image_recovery(image, &stock.recovery, out);
+    }
+    let package = stock.package.as_deref().context("the stock build names neither a package nor an image")?;
     let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).with_context(|| format!("make {}", parent.display()))?;
     // Taken out beside where it goes, so it is moved there whole.
     let work = tempfile::Builder::new().prefix(".stock").tempdir_in(parent).with_context(|| format!("make a folder in {}", parent.display()))?;
-    let payload = unpayload::Payload::open_url(&stock.package).with_context(|| format!("open {}", stock.package))?;
+    let payload = unpayload::Payload::open_url(package).with_context(|| format!("open {package}"))?;
     let options = unpayload::ExtractOptions { output_dir: work.path().to_path_buf(), partitions: vec![RECOVERY.into()], ..Default::default() };
     let report = |event: unpayload::Event<'_>| match event {
         unpayload::Event::Started { partitions } => {
@@ -185,13 +228,52 @@ fn take_stock_recovery(stock: &skyward_config::Stock, out: &Path) -> Result<()> 
         unpayload::Event::Extracted(image) => println!("took {} out: {} bytes", image.partition, image.size),
         unpayload::Event::Progress { .. } => {}
     };
-    let taken = payload.extract(&options, &report).with_context(|| format!("take {RECOVERY} out of {}", stock.package))?;
-    let image = taken.iter().find(|i| i.partition == RECOVERY).with_context(|| format!("{} holds no {RECOVERY} partition", stock.package))?;
+    let taken = payload.extract(&options, &report).with_context(|| format!("take {RECOVERY} out of {package}"))?;
+    let image = taken.iter().find(|i| i.partition == RECOVERY).with_context(|| format!("{package} holds no {RECOVERY} partition"))?;
     let sum: String = image.sha256.as_deref().context("the package's own sum of the image was not checked")?.iter().map(|b| format!("{b:02x}")).collect();
-    ensure!(sum == stock.recovery, "the {RECOVERY} partition in {} has the SHA-256 {sum}, where the configuration names {}", stock.package, stock.recovery);
+    ensure!(sum == stock.recovery, "the {RECOVERY} partition in {package} has the SHA-256 {sum}, where the configuration names {}", stock.recovery);
     std::fs::rename(&image.path, out).with_context(|| format!("move {} to {}", image.path.display(), out.display()))?;
     println!("wrote {} ({} bytes), its SHA-256 the one the configuration names", out.display(), image.size);
     Ok(())
+}
+
+/// Take the recovery image itself from where the phone's maker hands it
+/// out, and write it to `out` once its SHA-256 is the one the
+/// configuration names.
+fn take_image_recovery(url: &str, recovery: &str, out: &Path) -> Result<()> {
+    let parent = out.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).with_context(|| format!("make {}", parent.display()))?;
+    // Taken beside where it goes, so it is moved there whole.
+    let mut work = tempfile::NamedTempFile::new_in(parent).with_context(|| format!("make a file in {}", parent.display()))?;
+    let response = ureq::get(url).call().with_context(|| format!("open {url}"))?;
+    let mut body = response.into_body().into_reader();
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut size = 0usize;
+    loop {
+        let read = std::io::Read::read(&mut body, &mut buf).with_context(|| format!("read {url}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+        std::io::Write::write_all(&mut work, &buf[..read]).with_context(|| format!("write {}", out.display()))?;
+        size += read;
+    }
+    let sum: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    ensure!(sum == recovery, "{url} holds an image whose SHA-256 is {sum}, where the configuration names {recovery}");
+    work.persist(out).with_context(|| format!("move {} to {}", out.display(), out.display()))?;
+    println!("wrote {} ({size} bytes), its SHA-256 the one the configuration names", out.display());
+    Ok(())
+}
+
+/// The kernel `path` holds: the kernel of a boot image, or the kernel
+/// itself, as a kernel build hands it out (Image, Image.gz, Image.gz-dtb).
+fn kernel_bytes(path: &Path) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    if bytes.starts_with(b"ANDROID!") {
+        return Ok(BootImage::parse(&bytes).with_context(|| format!("read {}", path.display()))?.kernel);
+    }
+    Ok(bytes)
 }
 
 /// The size of the partition `stock` fills: all of it, as the phone and a
@@ -263,7 +345,7 @@ fn list(image: &Path) -> Result<()> {
         h.header_version(),
         img.kernel.len(),
         img.ramdisk.len(),
-        h.osversionpatch
+        h.osversionpatch()
     );
     if img.ramdisk.is_empty() {
         return Ok(());

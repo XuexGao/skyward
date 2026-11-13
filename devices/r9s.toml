@@ -1,0 +1,51 @@
+# OPPO R9s / R9sk (16017 / 16027, MSM8953 / Snapdragon 625).
+#
+# The phone is not A/B: it has one system and one recovery, on their own
+# partitions, and the recovery is built on the LineageOS 22.1 recovery
+# image, whose kernel is rebuilt from the 4.19 tree with the recovery
+# fragment in it. Its bootloader reads a signature patch after the image,
+# which travels on from the stock image.
+
+[device]
+codename = "r9s"
+brand = "OPPO"
+model = "OPPO R9s"
+# One system and one recovery, no slots.
+ab = false
+soc = { hans = "高通骁龙™ 625 移动平台", hant = "高通驍龍™ 625 行動平台", en = "Qualcomm Snapdragon 625" }
+
+[display]
+width = 1080
+height = 1920
+density = 400
+diagonal = 5.5
+
+# The recovery's kernel carries every driver the phone needs built in, so
+# there is nothing to load from the partitions.
+[modules]
+sources = []
+load = []
+
+# The stock recovery the image is built on: the LineageOS 22.1 recovery of
+# the phone's own latest build, whose init, adbd, SELinux policy and
+# libraries stay.
+[stock]
+version = "lineage-22.1-20260715"
+image = "https://github.com/BlueyfishReleases/R9s/releases/download/lineage-22.1-20260715-UNOFFICIAL-R9s/recovery.img"
+recovery = "1d021bdc07d5453b119b6e570d1ac9211c9eb357ec8cd79dc653465d8a081d63"
+
+# The partitions a backup of the baseband and EFS takes. The sensors'
+# calibration is in persist.
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+
+# Where the phone's own programs keep logs in the data partition; erasing
+# keeps the folders and takes their files.
+[wipe]
+logs = [
+    "/data/vendor/wifi",
+    "/data/vendor/ramdump",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]

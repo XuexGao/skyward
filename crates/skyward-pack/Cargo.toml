@@ -19,6 +19,8 @@ tempfile = "3.27.0"
 # Takes the stock recovery partition out of a full update package on its
 # server, reading only what that partition takes.
 unpayload = { version = "0.1.1", default-features = false, features = ["http"] }
+# Takes the stock recovery image itself from where a maker hands it out.
+ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "rustls-webpki-roots"] }
 
 [dev-dependencies]
 serde_json = "1.0.145"

@@ -1,0 +1,55 @@
+# OPPO A57 (16061, MSM8940 / Snapdragon 435).
+#
+# The phone is not A/B: it has one system and one recovery, on their own
+# partitions, and the recovery is built on the LineageOS 22.1 recovery
+# image, whose kernel is rebuilt from the 4.19 tree with the recovery
+# fragment in it. Its bootloader reads a signature patch after the image,
+# which travels on from the stock image.
+#
+# A57 and R9s need kernels of their own: their touchscreen drivers
+# (Goodix GT5688 here, Synaptics S3320 on the R9s) export the same symbols
+# and cannot be built into one kernel.
+
+[device]
+codename = "a57"
+brand = "OPPO"
+model = "OPPO A57"
+# One system and one recovery, no slots.
+ab = false
+soc = { hans = "高通骁龙™ 435 移动平台", hant = "高通驍龍™ 435 行動平台", en = "Qualcomm Snapdragon 435" }
+
+[display]
+width = 720
+height = 1280
+density = 280
+diagonal = 5.2
+
+# The recovery's kernel carries every driver the phone needs built in, so
+# there is nothing to load from the partitions.
+[modules]
+sources = []
+load = []
+
+# The stock recovery the image is built on: the LineageOS 22.1 recovery of
+# the phone's own latest build, whose init, adbd, SELinux policy and
+# libraries stay.
+[stock]
+version = "lineage-22.1-20260715"
+image = "https://github.com/BlueyfishReleases/A57/releases/download/lineage-22.1-20260715-UNOFFICIAL-A57/recovery.img"
+recovery = "4fb32feb0cea3f1b800a0ea014a45d15bab3dce10846914c32353e97b42d3959"
+
+# The partitions a backup of the baseband and EFS takes. The sensors'
+# calibration is in persist.
+[backup]
+efs = ["modemst1", "modemst2", "fsg", "fsc", "persist"]
+
+# Where the phone's own programs keep logs in the data partition; erasing
+# keeps the folders and takes their files.
+[wipe]
+logs = [
+    "/data/vendor/wifi",
+    "/data/vendor/ramdump",
+    "/data/vendor/ssrdump",
+    "/data/vendor/tombstones",
+    "/data/vendor/wlan_logs",
+]

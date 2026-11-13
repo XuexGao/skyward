@@ -1,6 +1,8 @@
 /// Filesystems Android puts on logical and metadata partitions, in the order
-/// a device's fstab lists alternatives for one mount point.
-pub const FILESYSTEMS: [&str; 3] = ["erofs", "ext4", "f2fs"];
+/// a device's fstab lists alternatives for one mount point. squashfs comes
+/// last: it is read-only, and the older phones keep their vendor partition
+/// as one, where the newer ones take erofs.
+pub const FILESYSTEMS: [&str; 4] = ["erofs", "ext4", "f2fs", "squashfs"];
 
 /// The words of a phone's mount options that the kernel takes as flags,
 /// as the phone's own fs_mgr reads them, with the kernel's bits for them

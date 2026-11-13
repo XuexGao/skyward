@@ -2308,6 +2308,7 @@ dependencies = [
  "abootimg-oxide",
  "anyhow",
  "cpio",
+ "flate2",
  "libc",
  "lz4_flex",
  "tempfile",
@@ -2451,6 +2452,7 @@ dependencies = [
  "skyward-config",
  "tempfile",
  "unpayload",
+ "ureq",
 ]
 
 [[package]]

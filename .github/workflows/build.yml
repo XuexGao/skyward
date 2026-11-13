@@ -41,6 +41,7 @@ jobs:
 
   tools:
     name: Build the recovery service and the packer
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -88,6 +89,11 @@ jobs:
   recovery:
     name: Recovery for ${{ matrix.device }}
     needs: [tools, devices]
+    # The fork's own phones are built by build-oppo.yml, which brings the
+    # kernel they need; the upstream devices are only built from the default
+    # branch, a tag, or by hand, since each takes a multi-gigabyte package
+    # from its maker's server.
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false

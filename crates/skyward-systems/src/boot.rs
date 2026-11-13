@@ -37,7 +37,7 @@ impl Start {
 /// beside it, compressed as the vendor ramdisk before it is, for the kernel
 /// to read on into it from there.
 fn archive(at: &str, program: &[u8], start: &Start) -> Result<Vec<u8>> {
-    let mut rd = Ramdisk { entries: Vec::new() };
+    let mut rd = Ramdisk::empty();
     rd.add(at, 0o750, program.to_vec())?;
     rd.add(START, 0o644, toml::to_string(start).context("write what the system starts with")?.into_bytes())?;
     Ok(lz4_legacy(&rd.archive()?))
@@ -82,7 +82,7 @@ pub fn with_program(image: &[u8], own_ramdisk: Option<u64>, program: &[u8], star
 pub(crate) mod tests {
     use super::*;
     use crate::state::tests::area;
-    use abootimg_oxide::{HeaderV3, OsVersionPatch};
+    use abootimg_oxide::{Header, HeaderV3, OsVersionPatch};
 
     /// A version 4 init_boot image with `ramdisk` and no kernel, filling a
     /// partition of a MiB.
@@ -94,7 +94,7 @@ pub(crate) mod tests {
             cmdline: Box::new([0; 1536]),
             v4_signature_size: Some(0),
         };
-        let mut image = BootImage { header, kernel: Vec::new(), ramdisk: ramdisk.to_vec() }.to_bytes().unwrap();
+        let mut image = BootImage::new(Header::V3(header), Vec::new(), ramdisk.to_vec()).to_bytes().unwrap();
         image.resize(1 << 20, 0);
         image
     }
