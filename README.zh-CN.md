@@ -126,8 +126,17 @@ Skyward 自己挂这些分区，并且走 4.19 内核留下的 framebuffer 而�
 LineageOS 22.1 recovery 镜像上的，其中的 init、adbd 与 SELinux 策略原样保留；
 内核用 4.19 树加上 recovery 专用片段（`vendor/oppo-recovery.config`）重新编译。
 `.github/workflows/build-oppo.yml` 把这一整套跑在 GitHub Actions 上：内核、
-recovery 服务与打包工具，最后每台机器一个 zip，作为 artifact，手动或打 tag
-时还会发 Release。
+recovery 服务与打包工具，最后每台机器一个 zip，作为各自 job 的 artifact 下载
+（本 fork 不发 Release）。
+
+刷机：解锁 bootloader，手机进 fastboot，然后（这两台机器没有槽位，
+recovery 就在自己的分区上）：
+
+```sh
+unzip skyward-<版本>-r9s-lineage-22.1-<日期>.zip
+fastboot flash recovery skyward-<版本>-r9s-lineage-22.1-<日期>.img
+fastboot reboot recovery
+```
 
 
 ## 安装 Skyward

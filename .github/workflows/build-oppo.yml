@@ -8,12 +8,14 @@ name: Build Skyward for OPPO R9s and A57
 #
 # The phone's stock recovery is taken from where the LineageOS builds for it
 # are handed out, checked against the SHA-256 in devices/<codename>.toml.
+#
+# Each image is handed out as the artifact of its own job, zipped; this fork
+# publishes no releases.
 on:
   push:
     # The branch both phones are built from, and the fork's default branch,
-    # which carries the same work; a tag publishes the images as a release.
+    # which carries the same work.
     branches: ["oppo-r9s-a57", "main"]
-    tags: ["v*"]
     paths:
       - "crates/**"
       - "devices/**"
@@ -26,11 +28,6 @@ on:
         description: The one device to build for; every device of devices/ when empty
         required: false
         default: ""
-      publish_release:
-        description: Publish the images as a release as well as artifacts
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: write
@@ -244,38 +241,3 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  release:
-    name: Publish the images
-    needs: [recovery]
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: skyward-*.zip
-          path: out
-          merge-multiple: true
-      - name: Name the release
-        id: name
-        run: |
-          set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            tag="$GITHUB_REF_NAME"
-          else
-            tag="oppo-$(date -u +%Y%m%d)-$GITHUB_RUN_NUMBER"
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "title=Skyward for OPPO R9s and A57 ($tag)" >> "$GITHUB_OUTPUT"
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.name.outputs.tag }}
-          TITLE: ${{ steps.name.outputs.title }}
-        run: |
-          set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" out/*.zip --clobber --repo "$GITHUB_REPOSITORY"
-          else
-            gh release create "$TAG" out/*.zip --title "$TITLE" --repo "$GITHUB_REPOSITORY" \
-              --notes "Skyward recovery for the OPPO R9s (r9s) and OPPO A57 (a57), built from the 4.19 kernel with vendor/oppo-recovery.config. data 解密尚未接入。"
-          fi

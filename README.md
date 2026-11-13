@@ -134,7 +134,17 @@ on the LineageOS 22.1 recovery image handed out for each phone, whose init,
 adbd and SELinux policy stay; the kernel is rebuilt from the 4.19 tree with
 the recovery fragment (`vendor/oppo-recovery.config`). `.github/workflows/build-oppo.yml`
 builds all of it: the kernel, the recovery service and the packer, and the
-zip per phone, as artifacts and, by hand or by tag, as a release.
+zip per phone, handed out as the artifact of its own job.
+
+Flashing one of those phones, with the bootloader unlocked and the phone in
+fastboot mode (it has no slots, so the recovery partition is the one to
+write):
+
+```sh
+unzip skyward-<version>-r9s-lineage-22.1-<date>.zip
+fastboot flash recovery skyward-<version>-r9s-lineage-22.1-<date>.img
+fastboot reboot recovery
+```
 
 
 ## Installing Skyward
