@@ -2550,6 +2550,7 @@ dependencies = [
  "prost",
  "skyward-binder",
  "skyward-block",
+ "skyward-config",
  "skyward-lp",
 ]
 

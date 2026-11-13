@@ -114,6 +114,22 @@ Skyward 是使用 Rust 编写的 recovery，从零开始编写。
 | 🚧 REDMI K100 Pro | `athens` | OS4.0.4.0.XPICNXM（Android 17） |
 | 🚧 REDMI K100 Pro Max | `songyuan` | OS4.0.4.0.XGNCNXM（Android 17） |
 
+### OPPO R9s 与 A57（本 fork）
+
+本 fork 增加了 OPPO R9s（含 R9sk 版本，MSM8953）与 OPPO A57（MSM8940）。
+两台机器都没有槽位，也没有 `super`：system、vendor 各自在一个分区上，
+vendor 还是 squashfs，bootloader 又会读 recovery 镜像末尾的签名补丁。
+Skyward 自己挂这些分区，并且走 4.19 内核留下的 framebuffer 而不是 KMS 画
+界面。data 解密还没有接。
+
+机型配置是 `devices/r9s.toml` 与 `devices/a57.toml`。镜像是叠在各机型
+LineageOS 22.1 recovery 镜像上的，其中的 init、adbd 与 SELinux 策略原样保留；
+内核用 4.19 树加上 recovery 专用片段（`vendor/oppo-recovery.config`）重新编译。
+`.github/workflows/build-oppo.yml` 把这一整套跑在 GitHub Actions 上：内核、
+recovery 服务与打包工具，最后每台机器一个 zip，作为 artifact，手动或打 tag
+时还会发 Release。
+
+
 ## 安装 Skyward
 
 Skyward 需要已解锁的 bootloader。从 [Releases](https://github.com/kirklin/skyward/releases) 下载对应机型的 zip，每个文件都标有机型和代号，例如 Xiaomi 17 Ultra (nezha)。使用 `SHA256SUMS` 核对并解压之后，在手机处于 fastboot 模式的时候，把其中的镜像刷入当前运行槽位的 recovery 分区：

@@ -45,16 +45,11 @@ impl Entry {
 /// How a ramdisk is compressed, as its first bytes say. Android's own
 /// images use LZ4 in the legacy framing; the ramdisks of the older images
 /// the OPPO phones boot are gzip, and are written back the same way.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Compression {
     Gzip,
+    #[default]
     Lz4Legacy,
-}
-
-impl Default for Compression {
-    fn default() -> Self {
-        Compression::Lz4Legacy
-    }
 }
 
 /// Gzip's magic number, as a ramdisk starts when it is compressed with it.

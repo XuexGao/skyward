@@ -112,6 +112,9 @@ fn ensure_no_snapshot() -> Result<()> {
 /// merge is under way. A partition an earlier run of the recovery service
 /// mounted, and that still shows, is taken as it is.
 pub fn mount_partitions(slot: Slot) -> Result<Mounts> {
+    if skyward_config::static_layout() {
+        return crate::static_layout::mount_partitions();
+    }
     let metadata = Path::new(METADATA);
     if !mount::is_mount_point(metadata)? {
         mount::mount_ro(&Path::new(BY_NAME).join("metadata"), metadata)?;
@@ -155,6 +158,9 @@ pub fn start_merge(slot: Slot, tell: &dyn Fn(MergeStatus) -> Result<()>) -> Resu
 /// snapshot, as following a merge needs; `false` where it reads through
 /// none.
 pub fn snapshots_mapped(slot: Slot) -> Result<bool> {
+    if skyward_config::static_layout() {
+        return Ok(false);
+    }
     let md = skyward_lp::read(&super_device(), slot.number())?;
     let Some(snaps) = Snapshots::lock(false)? else { return Ok(false) };
     if !snaps.needed(slot)? {
@@ -209,6 +215,9 @@ fn mount_mapped(p: &Partition, device: PathBuf, slot: Slot) -> Result<Mounted> {
 /// The base names of the slot's logical partitions (such as `system`,
 /// `vendor`), in the order super lists them, whether or not they are mounted.
 pub fn slot_bases(slot: Slot) -> Result<Vec<String>> {
+    if skyward_config::static_layout() {
+        return crate::static_layout::bases();
+    }
     let md = skyward_lp::read(&super_device(), slot.number())?;
     Ok(slot_partitions(&md, slot).into_iter().map(|p| base(p, slot).to_string()).collect())
 }
@@ -216,6 +225,9 @@ pub fn slot_bases(slot: Slot) -> Result<Vec<String>> {
 /// The slot's logical partitions by base name with the bytes each holds, in
 /// the order super lists them.
 pub fn slot_sizes(slot: Slot) -> Result<Vec<(String, u64)>> {
+    if skyward_config::static_layout() {
+        return crate::static_layout::sizes();
+    }
     let md = skyward_lp::read(&super_device(), slot.number())?;
     Ok(slot_partitions(&md, slot).into_iter().map(|p| (base(p, slot).to_string(), bytes(p))).collect())
 }
@@ -233,6 +245,11 @@ pub struct Whole {
 /// Map the slot's logical partition `base_name` whole as `name`, read-only
 /// or not, while no update snapshot is outstanding.
 pub fn map_whole(slot: Slot, base_name: &str, name: &str, readonly: bool) -> Result<Whole> {
+    if skyward_config::static_layout() {
+        // Nothing is mapped over a partition the phone keeps of its own:
+        // the partition itself is read and written.
+        return crate::static_layout::whole(base_name, name);
+    }
     ensure_no_snapshot()?;
     let super_dev = super_device();
     let md = skyward_lp::read(&super_dev, slot.number())?;
@@ -245,6 +262,9 @@ pub fn map_whole(slot: Slot, base_name: &str, name: &str, readonly: bool) -> Res
 
 /// Remove a mapping [`map_whole`] made.
 pub fn unmap_whole(whole: &Whole) -> Result<()> {
+    if skyward_config::static_layout() {
+        return Ok(());
+    }
     dm::remove(&whole.name)
 }
 
@@ -263,6 +283,11 @@ pub struct SlotMaps {
 /// One the recovery has mapped read-only already is made writable where
 /// it is, in use or not.
 pub fn map_slot(slot: Slot) -> Result<SlotMaps> {
+    if skyward_config::static_layout() {
+        // The install scripts of a phone without slots write the partitions
+        // by the names its own table gives them, so nothing is mapped.
+        return Ok(SlotMaps::default());
+    }
     ensure_no_snapshot()?;
     let super_dev = super_device();
     let md = skyward_lp::read(&super_dev, slot.number())?;
@@ -309,6 +334,9 @@ pub fn unmap_slot(maps: &SlotMaps) -> Result<()> {
 /// reads through an update's snapshots, from the snapshot already mapped
 /// where it was only unmounted.
 pub fn mount_one(slot: Slot, base_name: &str) -> Result<Mounted> {
+    if skyward_config::static_layout() {
+        return crate::static_layout::mount_base(base_name);
+    }
     let super_dev = super_device();
     let md = skyward_lp::read(&super_dev, slot.number())?;
     let devices = block_devices(&md, &super_dev)?;
@@ -352,6 +380,9 @@ fn unmap(name: &str, point: &Path) -> Result<()> {
 /// unmounted: its snapshot stays mapped, for its merge to go on and for it
 /// to be mounted again.
 pub fn unmount_one(slot: Slot, base_name: &str) -> Result<()> {
+    if skyward_config::static_layout() {
+        return crate::static_layout::unmount_base(base_name);
+    }
     let name = format!("{base_name}{}", slot.suffix());
     let point = mount_point(base_name);
     if !snapshots::is_snapshot(&name)? {
@@ -367,6 +398,9 @@ pub fn unmount_one(slot: Slot, base_name: &str) -> Result<()> {
 /// The slot's partitions that are mapped and show on their mount points, in
 /// the order they were mapped.
 pub fn mounted_partitions(slot: Slot) -> Result<Vec<Mounted>> {
+    if skyward_config::static_layout() {
+        return crate::static_layout::mounted_partitions();
+    }
     let mut found = Vec::new();
     for entry in fs::read_dir("/sys/block").context("read /sys/block")? {
         let entry = entry?;
@@ -395,6 +429,9 @@ pub fn mounted_partitions(slot: Slot) -> Result<Vec<Mounted>> {
 /// the tree, and those files and its device stay until let go. /metadata
 /// stays mounted for the update.
 pub fn release_partitions(slot: Slot, busy: &[PathBuf]) -> Result<()> {
+    if skyward_config::static_layout() {
+        return crate::static_layout::release(busy);
+    }
     for m in mounted_partitions(slot)?.into_iter().rev() {
         if busy.contains(&m.mount_point) {
             mount::umount_detach_over(&m.mount_point)?;
@@ -410,6 +447,9 @@ pub fn release_partitions(slot: Slot, busy: &[PathBuf]) -> Result<()> {
 /// device is what shows, remove their device-mapper devices, and unmount
 /// /metadata.
 pub fn unmount_partitions(slot: Slot) -> Result<()> {
+    if skyward_config::static_layout() {
+        return crate::static_layout::unmount_partitions();
+    }
     let md = skyward_lp::read(&super_device(), slot.number())?;
     for p in slot_partitions(&md, slot).into_iter().rev() {
         unmap(&p.name, &mount_point(base(p, slot)))?;

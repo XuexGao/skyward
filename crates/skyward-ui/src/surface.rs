@@ -1,9 +1,11 @@
 use crate::canvas::Canvas;
 use anyhow::Result;
 
-/// A present target. The device backend scans out through KMS; the host
-/// preview backend encodes PNGs. Keeping the renderer behind this trait is
-/// what lets the whole UI be built and reviewed without the phone.
+/// A present target. The device backend scans out through KMS where the
+/// kernel drives the panel that way, or through the frame buffer the older
+/// kernels leave; the host preview backend encodes PNGs. Keeping the
+/// renderer behind this trait is what lets the whole UI be built and
+/// reviewed without the phone.
 pub trait Surface {
     fn size(&self) -> (u32, u32);
     /// Hand `canvas` to the display. It returns once the frame before it is
@@ -12,6 +14,47 @@ pub trait Surface {
     fn present(&mut self, canvas: &Canvas) -> Result<()>;
     /// Wait until the frame presented last is on the panel.
     fn settle(&mut self) -> Result<()>;
+    /// What the display is, for the kernel log.
+    fn describe(&self) -> String {
+        "a display".to_string()
+    }
+    /// Whether the panel is drawing. A display turned off comes on again
+    /// with the next frame presented.
+    fn is_on(&self) -> bool {
+        true
+    }
+    /// Whether the panel is off, so the phone may sleep.
+    fn is_off(&self) -> bool {
+        !self.is_on()
+    }
+    /// Switch a panel that came on again to its fastest refresh, where it
+    /// has more than one.
+    fn speed_up(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Let the panel rest, ready to light again at once.
+    fn rest(&mut self) -> Result<()> {
+        Ok(())
+    }
+    /// Turn the display off; the next frame presented turns it on again.
+    fn turn_off(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The display the recovery draws on: the display processor through KMS
+/// where the phone's kernel drives the panel that way, and otherwise the
+/// frame buffer an older kernel leaves, as the OPPO phones' 4.19 kernel
+/// does, whose display driver is the mdss one.
+#[cfg(target_os = "android")]
+pub fn open() -> Result<Box<dyn Surface>> {
+    match kms::KmsSurface::open("/dev/dri/card0") {
+        Ok(surface) => Ok(Box::new(surface)),
+        Err(e) => {
+            eprintln!("no panel through KMS ({e:#}); drawing on the frame buffer instead");
+            Ok(Box::new(fb::FbSurface::open()?))
+        }
+    }
 }
 
 /// How Qualcomm's display driver drives a mode, from the text of the
@@ -911,6 +954,340 @@ pub mod kms {
             if self.flipping {
                 flipped(&self.card).context("flip")?;
                 self.flipping = false;
+            }
+            Ok(())
+        }
+
+        fn describe(&self) -> String {
+            KmsSurface::describe(self).to_string()
+        }
+
+        fn is_on(&self) -> bool {
+            KmsSurface::is_on(self)
+        }
+
+        fn is_off(&self) -> bool {
+            KmsSurface::is_off(self)
+        }
+
+        fn speed_up(&mut self) -> Result<()> {
+            KmsSurface::speed_up(self)
+        }
+
+        fn rest(&mut self) -> Result<()> {
+            KmsSurface::rest(self)
+        }
+
+        fn turn_off(&mut self) -> Result<()> {
+            KmsSurface::turn_off(self)
+        }
+    }
+}
+
+/// The frame buffer an older kernel leaves, as the OPPO phones' 4.19
+/// kernel does: Qualcomm's mdss display driver scans the panel out of a
+/// mapped frame buffer, with no KMS device to drive it through. The
+/// geometry comes from the driver's own screen information; where it keeps
+/// twice the panel's rows, the two halves are shown in turn so that a frame
+/// is drawn while the one before it goes out.
+#[cfg(target_os = "android")]
+pub mod fb {
+    use super::*;
+    use anyhow::{anyhow, bail, Context, Result};
+    use std::fs::{File, OpenOptions};
+    use std::os::fd::AsRawFd;
+    use std::ptr::null_mut;
+
+    /// linux/fb.h: the screen information ioctls and the blanking one.
+    const FBIOGET_VSCREENINFO: libc::c_ulong = 0x4600;
+    const FBIOGET_FSCREENINFO: libc::c_ulong = 0x4602;
+    const FBIOPAN_DISPLAY: libc::c_ulong = 0x4606;
+    const FBIOBLANK: libc::c_ulong = 0x4611;
+    /// FB_BLANK_UNBLANK and FB_BLANK_POWERDOWN.
+    const UNBLANK: libc::c_ulong = 0;
+    const POWERDOWN: libc::c_ulong = 4;
+
+    /// Where the frame buffers are, as Qualcomm's mdss driver makes them.
+    const DEVICES: [&str; 2] = ["/dev/graphics/fb0", "/dev/fb0"];
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Bitfield {
+        offset: u32,
+        length: u32,
+        msb_right: u32,
+    }
+
+    /// linux/fb.h's `fb_var_screeninfo`, with the kernel's own layout, which
+    /// the ioctl copies whole.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct VarScreeninfo {
+        xres: u32,
+        yres: u32,
+        xres_virtual: u32,
+        yres_virtual: u32,
+        xoffset: u32,
+        yoffset: u32,
+        bits_per_pixel: u32,
+        grayscale: u32,
+        red: Bitfield,
+        green: Bitfield,
+        blue: Bitfield,
+        transp: Bitfield,
+        nonstd: u32,
+        activate: u32,
+        height: u32,
+        width: u32,
+        accel_flags: u32,
+        pixclock: u32,
+        left_margin: u32,
+        right_margin: u32,
+        upper_margin: u32,
+        lower_margin: u32,
+        hsync_len: u32,
+        vsync_len: u32,
+        sync: u32,
+        vmode: u32,
+        rotate: u32,
+        colorspace: u32,
+        reserved: [u32; 4],
+    }
+
+    impl Default for VarScreeninfo {
+        fn default() -> Self {
+            // SAFETY: every field is a plain integer or an array of them.
+            unsafe { std::mem::zeroed() }
+        }
+    }
+
+    /// linux/fb.h's `fb_fix_screeninfo`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct FixScreeninfo {
+        id: [u8; 16],
+        smem_start: libc::c_ulong,
+        smem_len: u32,
+        type_: u32,
+        type_aux: u32,
+        visual: u32,
+        xpanstep: u16,
+        ypanstep: u16,
+        ywrapstep: u16,
+        line_length: u32,
+        mmio_start: libc::c_ulong,
+        mmio_len: u32,
+        accel: u32,
+        capabilities: u16,
+        reserved: [u16; 2],
+    }
+
+    impl Default for FixScreeninfo {
+        fn default() -> Self {
+            // SAFETY: every field is a plain integer or an array of them.
+            unsafe { std::mem::zeroed() }
+        }
+    }
+
+    /// How the frame buffer's pixels are laid out against the canvas's
+    /// straight-alpha RGBA, by which of the four bytes each channel's bits
+    /// start at: red, green, blue and nothing (`0xff`).
+    fn order(var: &VarScreeninfo) -> Result<[u8; 4]> {
+        if var.bits_per_pixel != 32 {
+            bail!("the frame buffer is {} bits to the pixel, and only 32 is drawn on", var.bits_per_pixel);
+        }
+        let mut out = [0xffu8; 4];
+        for (channel, bits) in [(0u8, var.red), (1, var.green), (2, var.blue), (3, var.transp)] {
+            if bits.length == 0 {
+                continue;
+            }
+            if bits.offset % 8 != 0 || bits.length != 8 {
+                bail!(
+                    "the frame buffer's {} channel is {} bits at bit {}, and only a byte at a byte is drawn on",
+                    ["red", "green", "blue", "alpha"][channel as usize],
+                    bits.length,
+                    bits.offset
+                );
+            }
+            out[(bits.offset / 8) as usize] = channel;
+        }
+        Ok(out)
+    }
+
+    /// The panel the frame buffer drives.
+    pub struct FbSurface {
+        file: File,
+        map: *mut u8,
+        len: usize,
+        var: VarScreeninfo,
+        /// The bytes from a row to the next.
+        stride: usize,
+        w: u32,
+        h: u32,
+        order: [u8; 4],
+        /// Whether the frame buffer keeps a second screen's rows, which the
+        /// next frame is drawn into before it is shown.
+        doubled: bool,
+        /// The half being drawn into, when it is doubled.
+        back: u32,
+        /// Whether the panel is drawing; off until the next frame.
+        on: bool,
+        summary: String,
+    }
+
+    // The mapping is the kernel's and is only written through `present`.
+    unsafe impl Send for FbSurface {}
+
+    impl FbSurface {
+        pub fn open() -> Result<Self> {
+            let mut last = None;
+            for path in DEVICES {
+                match FbSurface::open_one(path) {
+                    Ok(surface) => return Ok(surface),
+                    Err(e) => last = Some(e.context(format!("open {path}"))),
+                }
+            }
+            Err(last.unwrap_or_else(|| anyhow!("no frame buffer device")))
+        }
+
+        fn open_one(path: &str) -> Result<Self> {
+            let file = OpenOptions::new().read(true).write(true).open(path).with_context(|| format!("open {path}"))?;
+            let fd = file.as_raw_fd();
+            let mut var = VarScreeninfo::default();
+            if unsafe { libc::ioctl(fd, FBIOGET_VSCREENINFO as _, &mut var) } != 0 {
+                return Err(std::io::Error::last_os_error()).context("read the screen information");
+            }
+            let mut fix = FixScreeninfo::default();
+            if unsafe { libc::ioctl(fd, FBIOGET_FSCREENINFO as _, &mut fix) } != 0 {
+                return Err(std::io::Error::last_os_error()).context("read the frame buffer's own information");
+            }
+            if var.xres == 0 || var.yres == 0 || fix.line_length == 0 {
+                bail!("the frame buffer reports a {}x{} screen with {} bytes to the row", var.xres, var.yres, fix.line_length);
+            }
+            let order = order(&var)?;
+            let stride = fix.line_length as usize;
+            // The rows the driver keeps, which may be twice the panel's so
+            // that a frame is drawn while the one before it goes out.
+            let rows = var.yres_virtual.max(var.yres) as usize;
+            let len = stride * rows;
+            let map = unsafe { libc::mmap(null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0) };
+            if map == libc::MAP_FAILED {
+                return Err(std::io::Error::last_os_error()).context("map the frame buffer");
+            }
+            let doubled = var.yres_virtual >= var.yres * 2 && fix.ypanstep > 0;
+            let summary = format!(
+                "{path}, {}x{} at {} bpp on {} bytes to the row{}, pixels {}",
+                var.xres,
+                var.yres,
+                var.bits_per_pixel,
+                stride,
+                if doubled { ", two screens' rows" } else { "" },
+                order.iter().map(|b| [".", "r", "g", "b", "a"][(*b as usize).min(4)]).collect::<String>()
+            );
+            eprintln!("display {summary}");
+            Ok(FbSurface { file, map: map.cast(), len, var, stride, w: var.xres, h: var.yres, order, doubled, back: 0, on: true, summary })
+        }
+
+        /// Blank the display, or light it again; the driver may have no
+        /// blanking, which costs only the power it saves.
+        fn blank(&mut self, level: libc::c_ulong) {
+            if unsafe { libc::ioctl(self.file.as_raw_fd(), FBIOBLANK as _, level) } != 0 {
+                eprintln!("the frame buffer would not blank: {}", std::io::Error::last_os_error());
+            }
+        }
+
+        /// Draw `canvas` into the half being filled and show it, if the
+        /// frame buffer keeps two.
+        fn write_and_show(&mut self, canvas: &Canvas) -> Result<()> {
+            let stride = self.stride;
+            let (w, h) = (self.w as usize, self.h as usize);
+            let row = w * 4;
+            if canvas.data.len() < row * h {
+                bail!("the canvas holds {} bytes, and {}x{} needs {}", canvas.data.len(), w, h, row * h);
+            }
+            let base = if self.doubled { self.back as usize * h * stride } else { 0 };
+            if base + stride * h > self.len {
+                bail!("the frame buffer holds {} bytes, and the frame needs {}", self.len, base + stride * h);
+            }
+            let dst = unsafe { std::slice::from_raw_parts_mut(self.map.add(base), stride * h) };
+            let order = self.order;
+            for y in 0..h {
+                let src = &canvas.data[y * row..(y + 1) * row];
+                let out = &mut dst[y * stride..y * stride + row];
+                if order == [0, 1, 2, 3] {
+                    out.copy_from_slice(src);
+                } else {
+                    for (o, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+                        *o = [s[order[0] as usize], s[order[1] as usize], s[order[2] as usize], s[order[3] as usize]];
+                    }
+                }
+            }
+            if self.doubled {
+                self.var.yoffset = self.back * self.h;
+                if unsafe { libc::ioctl(self.file.as_raw_fd(), FBIOPAN_DISPLAY as _, &self.var) } != 0 {
+                    return Err(std::io::Error::last_os_error()).context("show the frame");
+                }
+                self.back ^= 1;
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for FbSurface {
+        fn drop(&mut self) {
+            if !self.map.is_null() {
+                unsafe { libc::munmap(self.map.cast(), self.len) };
+                self.map = null_mut();
+            }
+        }
+    }
+
+    impl Surface for FbSurface {
+        fn size(&self) -> (u32, u32) {
+            (self.w, self.h)
+        }
+
+        fn present(&mut self, canvas: &Canvas) -> Result<()> {
+            if (canvas.w, canvas.h) != (self.w, self.h) {
+                return Err(anyhow!("canvas {}x{} does not match the display {}x{}", canvas.w, canvas.h, self.w, self.h));
+            }
+            if !self.on {
+                self.blank(UNBLANK);
+                self.on = true;
+            }
+            self.write_and_show(canvas)
+        }
+
+        /// The frame was written out as it was drawn, and the panel has no
+        /// event to wait for; a frame buffer with two screens' rows has the
+        /// row it shows after the flip, and the half it drew into is behind
+        /// it.
+        fn settle(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn describe(&self) -> String {
+            self.summary.clone()
+        }
+
+        fn is_on(&self) -> bool {
+            self.on
+        }
+
+        fn is_off(&self) -> bool {
+            !self.on
+        }
+
+        fn rest(&mut self) -> Result<()> {
+            // The panel is left drawing, lit by the backlight's own switch;
+            // it is turned off once its rest is over.
+            Ok(())
+        }
+
+        fn turn_off(&mut self) -> Result<()> {
+            if self.on {
+                self.blank(POWERDOWN);
+                self.on = false;
             }
             Ok(())
         }

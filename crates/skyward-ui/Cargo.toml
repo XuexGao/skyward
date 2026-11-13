@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+# The frame buffer the older kernels leave is driven by ioctls of its own.
+libc = { workspace = true }
 ab_glyph = "0.2.32"
 # The stock status bar's outlines are filled as glyphs are.
 ab_glyph_rasterizer = "0.1.10"

@@ -41,8 +41,7 @@ use skyward_ui::app::{
     INSTALL_UNFINISHED, USB_DRIVE,
 };
 use skyward_ui::settings::Keeper;
-use skyward_ui::surface::kms::KmsSurface;
-use skyward_ui::{Canvas, Fonts, Lang, Surface};
+use skyward_ui::{Canvas, Fonts, Lang};
 use skyward_vab::{Merge, Standing};
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
@@ -1051,7 +1050,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     }
     let mut info = skyward_info::collect(cfg)?;
     let fonts = Fonts::load(font, 0, mono)?;
-    let mut surface = KmsSurface::open("/dev/dri/card0")?;
+    let mut surface = skyward_ui::surface::open()?;
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;

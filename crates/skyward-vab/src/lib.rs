@@ -7,6 +7,8 @@ use std::path::Path;
 #[cfg(target_os = "android")]
 pub mod boot;
 mod partitions;
+/// The partitions of a phone that keeps them of its own.
+pub mod static_layout;
 pub mod snapshots;
 
 pub use partitions::{
@@ -72,8 +74,13 @@ pub struct BootSlots {
     pub successful: [bool; 2],
 }
 
-/// The booted slot, or `None` on devices that are not A/B.
+/// The booted slot, or `None` on devices that are not A/B. A phone that
+/// keeps its partitions of its own has the one slot, which the rest of the
+/// recovery works with as slot A.
 pub fn current_slot() -> Result<Option<Slot>> {
+    if skyward_config::static_layout() {
+        return Ok(Some(Slot::A));
+    }
     match skyward_block::slot_suffix()? {
         None => Ok(None),
         Some(s) => Slot::from_suffix(&s).map(Some).ok_or_else(|| anyhow!("slot suffix {s:?}")),
@@ -264,6 +271,11 @@ impl Update {
 }
 
 pub fn snapshot_state() -> Result<SnapshotState> {
+    // A phone that keeps its partitions of its own has no update snapshots
+    // to read: nothing is ever mapped through them.
+    if skyward_config::static_layout() {
+        return Ok(SnapshotState::None);
+    }
     if !skyward_block::mount::is_mount_point(Path::new(METADATA))? {
         return Ok(SnapshotState::Unknown);
     }
@@ -273,7 +285,7 @@ pub fn snapshot_state() -> Result<SnapshotState> {
 /// The update libsnapshot keeps track of, where /metadata is mounted to
 /// tell; `None` where it is not.
 pub fn update() -> Result<Option<Update>> {
-    if !skyward_block::mount::is_mount_point(Path::new(METADATA))? {
+    if skyward_config::static_layout() || !skyward_block::mount::is_mount_point(Path::new(METADATA))? {
         return Ok(None);
     }
     read_update(Path::new(OTA_DIR)).map(Some)

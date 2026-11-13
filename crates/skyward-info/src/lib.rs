@@ -159,7 +159,9 @@ pub fn collect(cfg: &DeviceConfig) -> Result<DeviceInfo> {
         kernel: kernel_release()?,
         storage: storage()?,
         battery: battery(Path::new(POWER_SUPPLY))?,
-        slot: skyward_vab::current_slot()?,
+        // A phone that keeps its partitions of its own has no slots to
+        // show, though the rest of the recovery works with its one slot.
+        slot: if skyward_config::static_layout() { None } else { skyward_vab::current_slot()? },
         snapshot: skyward_vab::snapshot_state()?,
         boot: Boot { unlocked, verified: skyward_block::boot_param("androidboot.verifiedbootstate")? },
     })

@@ -2,6 +2,7 @@ use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Recovery ramdisk files Skyward reads, adds or changes, as archive paths
 /// (they sit under `/` once the kernel unpacks the ramdisk).
@@ -214,6 +215,24 @@ pub struct Wipe {
 
 /// The data partition, which the folders erasing takes in are in.
 const DATA: &str = "/data";
+
+/// Whether the phone the loaded configuration describes keeps its
+/// partitions of its own, as the OPPO phones do, rather than in slots and
+/// super. The recovery loads its configuration before it mounts anything,
+/// so everything that follows reads the phone the one way or the other.
+static STATIC_LAYOUT: AtomicBool = AtomicBool::new(false);
+
+/// Whether the phone keeps its partitions of its own: one system, one
+/// vendor, one of everything, with no slots and no dynamic partitions.
+pub fn static_layout() -> bool {
+    STATIC_LAYOUT.load(Ordering::Relaxed)
+}
+
+/// Set whether the phone keeps its partitions of its own; the recovery sets
+/// it from the configuration it loads.
+pub fn set_static_layout(static_layout: bool) {
+    STATIC_LAYOUT.store(static_layout, Ordering::Relaxed);
+}
 
 /// The vibration motor, played through the kernel's force-feedback events:
 /// its click, a waveform its driver keeps or one made from samples at the
@@ -512,7 +531,9 @@ impl DeviceConfig {
         let p = path.as_ref();
         let text = std::fs::read_to_string(p)
             .with_context(|| format!("read config {}", p.display()))?;
-        Self::parse(&text)
+        let cfg = Self::parse(&text)?;
+        set_static_layout(!cfg.device.ab);
+        Ok(cfg)
     }
 
     pub fn parse(text: &str) -> Result<Self> {

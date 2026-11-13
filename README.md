@@ -120,6 +120,23 @@ the data partition.
 | 🚧 REDMI K100 Pro | `athens` | OS4.0.4.0.XPICNXM (Android 17) |
 | 🚧 REDMI K100 Pro Max | `songyuan` | OS4.0.4.0.XGNCNXM (Android 17) |
 
+### OPPO R9s and A57 (this fork)
+
+This fork adds the OPPO R9s (also the R9sk build of it, MSM8953) and the OPPO
+A57 (MSM8940). Both are phones without slots and without `super`: one system
+and one vendor on partitions of their own, the vendor one a squashfs, and a
+bootloader that reads a signature patch after the recovery image. Skyward
+mounts those partitions itself, drawing through the frame buffer the 4.19
+kernel leaves rather than through KMS. Data decryption is not wired up yet.
+
+`devices/r9s.toml` and `devices/a57.toml` name the phones. The image is built
+on the LineageOS 22.1 recovery image handed out for each phone, whose init,
+adbd and SELinux policy stay; the kernel is rebuilt from the 4.19 tree with
+the recovery fragment (`vendor/oppo-recovery.config`). `.github/workflows/build-oppo.yml`
+builds all of it: the kernel, the recovery service and the packer, and the
+zip per phone, as artifacts and, by hand or by tag, as a release.
+
+
 ## Installing Skyward
 
 Skyward needs an unlocked bootloader. Download the zip for your phone from
