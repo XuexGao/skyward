@@ -144,3 +144,112 @@ pub fn key_service() -> Result<String, String> {
     with_key_service(|service| service.described())
 }
 
+
+/// Say how far opening the data partition gets, step by step, without
+/// changing anything, so that a phone whose data does not open says where
+/// it stops rather than only that it did.
+///
+/// Every step reports what it found and why it could not go on, and the
+/// work goes on to the next step where one fails: the point is to see all
+/// of it at once on a phone with no keyboard to type at.
+#[cfg(target_os = "android")]
+pub fn report(credential: Option<&str>, user: u32, clean: bool) -> Result<()> {
+    use skyward_crypto::data;
+    let say = |step: &str, done: Result<String>| {
+        match done {
+            Ok(said) => println!("{step}: {said}"),
+            Err(e) => println!("{step}: no, {e:#}"),
+        }
+    };
+    let table = skyward_block::fstab::read(data::MOUNT);
+    let entries = match &table {
+        Ok(entries) => entries,
+        Err(e) => {
+            println!("the phone's table for /data: no, {e:#}");
+            return Ok(());
+        }
+    };
+    for e in entries {
+        println!("the phone's table for /data: {} -> {} {}", e.device, e.mount_point, e.filesystem);
+        println!("  options {:?}, flags {:?}", e.options, e.extras);
+    }
+    if entries.is_empty() {
+        println!("the phone's table for /data: says nothing");
+        return Ok(());
+    }
+    say("the key service", key_service().map_err(anyhow::Error::msg));
+    say(
+        "how the partition is encrypted whole",
+        (|| -> Result<String> {
+            let entry = entries.first().context("no entry")?;
+            Ok(match skyward_crypto::data::Encryption::of(entry)? {
+                Some(e) => format!("{}, keys the hardware holds: {}", e.cipher, e.wrapped),
+                None => "not at all: each user's files are encrypted instead".to_string(),
+            })
+        })(),
+    );
+    for probe in ["/data/misc", "/data/system", "/data/data"] {
+        say(
+            &format!("the policy of {probe}"),
+            skyward_crypto::fscrypt::policy_of(std::path::Path::new(probe)).map(|p| match p {
+                Some(p) => format!("version {}, descriptor {:?}", p.version, p.descriptor),
+                None => "none of its own".to_string(),
+            }).map_err(anyhow::Error::from),
+        );
+    }
+    let mode = std::fs::read_to_string("/data/unencrypted/mode");
+    say("the mode of the shared key", mode.as_ref().map(|m| m.trim().to_string()).map_err(|e| anyhow::anyhow!("{e}")));
+    for (what, path) in [
+        ("the shared key", "/data/unencrypted/key"),
+        ("the shared key's name", "/data/unencrypted/ref"),
+        ("the key store", skyward_crypto::keystore2::DATABASE),
+        ("the lock settings", skyward_crypto::locksettings::DATABASE),
+    ] {
+        say(what, std::fs::metadata(path).map(|m| format!("{} bytes", m.len())).map_err(|e| anyhow::anyhow!("{path}: {e}")));
+    }
+    let mut users = Vec::new();
+    for dir in ["/data/misc/vold/user_keys/de", "/data/misc/vold/user_keys/ce"] {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                let names: Vec<String> = entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+                say(dir, Ok(format!("{names:?}")));
+                if dir.ends_with("/de") {
+                    users = names.iter().filter_map(|n| n.parse::<u32>().ok()).collect();
+                }
+            }
+            Err(e) => say(dir, Err(anyhow::anyhow!("{e}"))),
+        }
+    }
+    if users.is_empty() {
+        println!("then: no user's keys are on the partition; there is nothing to open");
+        return Ok(());
+    }
+    let opened = with_key_service(|service| skyward_crypto::data::open_without_credential(service));
+    match &opened {
+        Ok(o) => {
+            println!(
+                "then: /data {} , closed users {:?}",
+                if o.mounted.is_some() { "opened" } else { "was open already" },
+                o.closed
+            );
+        }
+        Err(e) => println!("then: /data did not open: {e}"),
+    }
+    if let Some(credential) = credential {
+        match &opened {
+            Ok(o) => match with_key_service(|service| skyward_crypto::data::unlock(service, &o.closed, user, credential.as_bytes())) {
+                Ok(still) => println!("then: after the credential of user {user}, still closed {still:?}"),
+                Err(e) => println!("then: the credential of user {user} did not open their files: {e}"),
+            },
+            Err(_) => println!("then: the credential was not tried, the partition did not open"),
+        }
+    }
+    if clean {
+        if let Err(e) = skyward_crypto::data::close() {
+            println!("then: closing left something behind: {e:#}");
+        } else {
+            println!("then: closed again, as it was found");
+        }
+    }
+    Ok(())
+}

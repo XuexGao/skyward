@@ -90,6 +90,24 @@ enum Cmd {
     },
     /// Tell what a package or image is, the way the installer reads it.
     Identify { file: PathBuf },
+    /// Say how far opening the data partition gets, step by step, without
+    /// changing anything: what the phone's table says about the partition,
+    /// how it is encrypted, whether each key service answers, what the
+    /// mount carries, and which users' keys are there. `--credential` is
+    /// what a user types at their screen lock, given the way the recovery
+    /// reads it.
+    #[cfg(target_os = "android")]
+    Decrypt {
+        /// The credential of `--user`, as it is typed.
+        #[arg(long)]
+        credential: Option<String>,
+        /// The user whose credential is given.
+        #[arg(long, default_value_t = 0)]
+        user: u32,
+        /// Unmount the partition afterwards, leaving it as it was found.
+        #[arg(long)]
+        clean: bool,
+    },
     /// Discard all a block device holds and write zeros over its start, as
     /// a factory reset erases the data partition.
     #[cfg(target_os = "android")]
@@ -225,6 +243,8 @@ fn main() -> Result<()> {
     }
     match Cli::parse().cmd {
         Cmd::Info { config } => info(&config),
+        #[cfg(target_os = "android")]
+        Cmd::Decrypt { credential, user, clean } => decrypt::report(credential.as_deref(), user, clean),
         Cmd::Slot => slot(),
         Cmd::Modules { source } => modules(&source),
         Cmd::Load { config, names } => {

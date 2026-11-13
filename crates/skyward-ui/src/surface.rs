@@ -1128,6 +1128,10 @@ pub mod fb {
         /// Whether the frame buffer keeps a second screen's rows, which the
         /// next frame is drawn into before it is shown.
         doubled: bool,
+        /// Whether the driver will show the half a frame was drawn into.
+        /// One that will not is drawn into the half the panel is already
+        /// looking at, and everything is read by a person from there on.
+        panning: bool,
         /// The half being drawn into, when it is doubled.
         back: u32,
         /// Whether the panel is drawing; off until the next frame.
@@ -1177,7 +1181,10 @@ pub mod fb {
             let doubled = var.yres_virtual >= var.yres * 2 && fix.ypanstep > 0;
             // The half the panel is not showing is the one the first frame
             // goes into, so that it is drawn out of sight and then shown.
-            let back = if !doubled || var.yoffset < var.yres { 1 } else { 0 };
+            let shown = if var.yoffset >= var.yres { 1 } else { 0 };
+            // The half the panel is not showing is the one the first frame
+            // goes into, so that it is drawn out of sight and then shown.
+            let back = if doubled { 1 - shown } else { shown };
             let summary = format!(
                 "{path}, {}x{} at {} bpp on {} bytes to the row{}, pixels {}",
                 var.xres,
@@ -1188,7 +1195,7 @@ pub mod fb {
                 order.iter().map(|b| [".", "r", "g", "b", "a"][(*b as usize).min(4)]).collect::<String>()
             );
             eprintln!("display {summary}");
-            Ok(FbSurface { file, map: map.cast(), len, var, stride, w: var.xres, h: var.yres, order, doubled, back, on: true, summary })
+            Ok(FbSurface { file, map: map.cast(), len, var, stride, w: var.xres, h: var.yres, order, doubled, panning: doubled, back, on: true, summary })
         }
 
         /// Blank the display, or light it again; the driver may have no
@@ -1201,14 +1208,16 @@ pub mod fb {
 
         /// Draw `canvas` into the half being filled and show it, if the
         /// frame buffer keeps two.
-        fn write_and_show(&mut self, canvas: &Canvas) -> Result<()> {
+        /// Put `canvas` in the half `half` of the frame buffer. When the
+        /// buffer keeps only one screen's rows, `half` is ignored.
+        fn paint(&self, canvas: &Canvas, half: u32) -> Result<()> {
             let stride = self.stride;
             let (w, h) = (self.w as usize, self.h as usize);
             let row = w * 4;
             if canvas.data.len() < row * h {
                 bail!("the canvas holds {} bytes, and {}x{} needs {}", canvas.data.len(), w, h, row * h);
             }
-            let base = if self.doubled { self.back as usize * h * stride } else { 0 };
+            let base = if self.doubled { half as usize * h * stride } else { 0 };
             if base + stride * h > self.len {
                 bail!("the frame buffer holds {} bytes, and the frame needs {}", self.len, base + stride * h);
             }
@@ -1225,12 +1234,29 @@ pub mod fb {
                     }
                 }
             }
-            if self.doubled {
+            Ok(())
+        }
+
+        fn write_and_show(&mut self, canvas: &Canvas) -> Result<()> {
+            self.paint(canvas, self.back)?;
+            if self.doubled && self.panning {
                 self.var.yoffset = self.back * self.h;
                 if unsafe { libc::ioctl(self.file.as_raw_fd(), FBIOPAN_DISPLAY as _, &self.var) } != 0 {
-                    return Err(std::io::Error::last_os_error()).context("show the frame");
+                    // The driver would not show the half the frame went into:
+                    // the display processor behind it never came up, or the
+                    // panel is powered down, and it answers the same way for
+                    // both. A screen someone can read is worth more than the
+                    // buffering a second screen's rows give, so the frame is
+                    // drawn where the panel is already looking, and the half
+                    // it is not looking at is left alone from here on.
+                    let why = std::io::Error::last_os_error();
+                    self.panning = false;
+                    self.back = if self.var.yoffset >= self.h { 1 } else { 0 };
+                    self.paint(canvas, self.back).with_context(|| format!("draw where the panel is looking, after {why}"))?;
+                    self.summary.push_str(&format!(", no panning ({why}); frames go where the panel looks"));
+                } else {
+                    self.back ^= 1;
                 }
-                self.back ^= 1;
             }
             Ok(())
         }

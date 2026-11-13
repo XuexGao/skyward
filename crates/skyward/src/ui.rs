@@ -1059,7 +1059,16 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     // adbd and fastbootd ask over it to go over to fastboot and back.
     let control = Control::open()?;
     let mut haptics = cfg.haptics.as_ref().map(Haptics::open).transpose()?;
-    let mut backlight = Backlight::open()?;
+    // Without a backlight of its own the panel is lit by whatever the
+    // bootloader left, and the pages are drawn all the same.
+    let mut backlight = match Backlight::open() {
+        Ok(backlight) => Some(backlight),
+        Err(e) => {
+            eprintln!("no backlight: {e:#}");
+            let _ = skyward_sys::kmsg(&format!("no backlight: {e:#}"));
+            None
+        }
+    };
     let first = match &request.work {
         Work::Fastboot => Screen::Fastboot,
         Work::PromptWipeData => Screen::CantStart,
@@ -1465,10 +1474,15 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         // After the frame is on the panel, so a panel coming back on lights
         // with what it should show now, never with what it showed when it
         // went off.
-        if backlight.level == 0 && panel.is_some() {
+        if backlight.as_ref().is_some_and(|b| b.level == 0) && panel.is_some() {
             surface.settle()?;
         }
-        backlight.show(panel)?;
+        match &mut backlight {
+            Some(backlight) => backlight.show(panel)?,
+            // Without a switch of its own the panel is left as it is, lit by
+            // whatever the bootloader left it at.
+            None => {}
+        }
         if panel.is_some() {
             // Lit, a panel that came on again switches to its fastest
             // refresh.
