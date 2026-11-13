@@ -1053,6 +1053,9 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mut surface = skyward_ui::surface::open()?;
     let (w, h) = surface.size();
     eprintln!("display {}", surface.describe());
+    // Where the display itself does not come up, the kernel log is the only
+    // place a person can look, so what the panel is drawn on goes there too.
+    skyward_sys::kmsg(&format!("the display is {}", surface.describe()))?;
     let mut inputs = Inputs::open(w, h, cfg.touch.writes.clone())?;
     let started = Instant::now();
     let mut touch_known = false;
