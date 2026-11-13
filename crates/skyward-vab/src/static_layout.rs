@@ -109,16 +109,27 @@ pub fn mount_one(entry: &Entry) -> Result<Mounted> {
         mount::visible(&at)?.map(|v| v.filesystem).unwrap_or_else(|| "unknown".to_string())
     } else {
         fs::create_dir_all(&at).with_context(|| format!("create {}", at.display()))?;
-        mount::mount_ro(&device, &at).with_context(|| format!("mount {} on {}", entry.partition, at.display()))?.to_string()
+        // Over whatever shows there, as the recovery's init may have
+        // mounted the phone's own partitions in the folders below it.
+        mount::mount_ro_over(&device, &at).with_context(|| format!("mount {} on {}", entry.partition, at.display()))?.to_string()
     };
     Ok(Mounted { partition: entry.recovery_name(), device, mount_point: at, filesystem })
 }
 
-/// Mount the phone's partitions read-only, in the order of the table.
+/// Mount the phone's partitions read-only, in the order of the table. One
+/// that does not mount is left out with the reason said, as a phone whose
+/// super cannot be read still comes up: the recovery stays usable without
+/// it, and what is mounted is what the pages work with.
 pub fn mount_partitions() -> Result<Mounts> {
     let mut mounts = Mounts::default();
     for entry in entries()? {
-        mounts.partitions.push(mount_one(&entry)?);
+        match mount_one(&entry) {
+            Ok(mounted) => mounts.partitions.push(mounted),
+            Err(e) => {
+                mounts.damaged.push(format!("{}: {e:#}", entry.base));
+                eprintln!("{} not mounted: {e:#}", entry.base);
+            }
+        }
     }
     Ok(mounts)
 }

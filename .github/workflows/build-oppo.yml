@@ -10,7 +10,10 @@ name: Build Skyward for OPPO R9s and A57
 # are handed out, checked against the SHA-256 in devices/<codename>.toml.
 on:
   push:
-    branches: ["oppo-r9s-a57"]
+    # The branch both phones are built from, and the fork's default branch,
+    # which carries the same work; a tag publishes the images as a release.
+    branches: ["oppo-r9s-a57", "main"]
+    tags: ["v*"]
     paths:
       - "crates/**"
       - "devices/**"
