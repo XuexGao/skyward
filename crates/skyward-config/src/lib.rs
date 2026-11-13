@@ -678,7 +678,8 @@ mod tests {
             assert!(!cfg.device.ab, "the phone keeps one system, not two slots");
             let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
             for want in [
-                "/mnt/system/system/bin/hwservicemanager",
+                "/mnt/system/bin/hwservicemanager",
+                "/vendor/bin/vndservicemanager",
                 "/vendor/bin/qseecomd",
                 "/vendor/bin/hw/android.hardware.keymaster@3.0-service",
                 "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service",
@@ -692,7 +693,7 @@ mod tests {
             // The directory the hardware services register with has to be
             // running before any of them does, and the daemon they reach
             // the secure world through before the two that hold the keys.
-            assert!(order("/mnt/system/system/bin/hwservicemanager") < order("/vendor/bin/qseecomd"));
+            assert!(order("/mnt/system/bin/hwservicemanager") < order("/vendor/bin/qseecomd"));
             assert!(order("/vendor/bin/qseecomd") < order("/vendor/bin/hw/android.hardware.keymaster@3.0-service"));
             for s in cfg.services.iter().filter(|s| s.path.contains("@3.0-service") || s.path.contains("@1.0-service")) {
                 assert!(s.ready_hardware_service.is_some(), "{} is waited for", s.path);

@@ -518,6 +518,19 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
             skyward_sys::kmsg(&format!("logd not started: {e:#}"))?;
         }
     }
+    // The name each of the binder drivers answers at. A recovery's own
+    // init mounts binderfs and links one of them, and a phone whose
+    // hardware services are reached over another needs that one too: the
+    // daemon they register with is given the node by name, and without it
+    // it starts and stops at once, leaving every look-up unanswered.
+    for (name, node) in [("binder", "/dev/binder"), ("hwbinder", "/dev/hwbinder"), ("vndbinder", "/dev/vndbinder")] {
+        let at = Path::new(node);
+        let inside = Path::new("/dev/binderfs").join(name);
+        if !at.exists() && inside.exists() {
+            std::os::unix::fs::symlink(&inside, at).with_context(|| format!("link {} to {}", inside.display(), at.display()))?;
+            skyward_sys::kmsg(&format!("{node} is {}", inside.display()))?;
+        }
+    }
     let services: Vec<_> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().collect();
     // The drivers ask for their firmware by name, and the kernel looks only
     // in folders of its own unless told to pass on what it does not find

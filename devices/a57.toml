@@ -44,11 +44,21 @@ recovery = "4fb32feb0cea3f1b800a0ea014a45d15bab3dce10846914c32353e97b42d3959"
 # speaks the older hardware interface can be found at all: every look-up
 # answers that the service is not there.
 [[service]]
-path = "/mnt/system/system/bin/hwservicemanager"
-libraries = ["/mnt/system/system/lib64", "/mnt/system/system/lib64/bootstrap"]
+path = "/mnt/system/bin/hwservicemanager"
+libraries = ["/mnt/system/lib64", "/mnt/system/lib64/bootstrap"]
 ready_property = "hwservicemanager.ready"
 user = "root"
 groups = ["root"]
+
+# The directory the vendor partition's own hardware services register
+# with, which is a second one beside the rest of the phone's, and which the
+# two services below register into. A recovery carries none of it either.
+[[service]]
+path = "/vendor/bin/vndservicemanager"
+args = ["/dev/vndbinder"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "system"
+groups = ["system", "readproc"]
 
 # The secure world is reached from the system through these, and without
 # them the data partition cannot be opened: the daemon below registers the
