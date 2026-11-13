@@ -1,6 +1,8 @@
 //! Letting a key into a filesystem, so the files it was used on can be
 //! read. The kernel keeps the key for the filesystem, not for any one
-//! file, and names it by a hash it works out itself.
+//! file, and names it by a hash it works out itself, or, on the phones that
+//! encrypt each user's files the older way, by a descriptor the phone chose
+//! when it made the key.
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -8,23 +10,48 @@ use std::path::Path;
 /// How long the name the kernel gives a key is.
 pub const NAME_BYTES: usize = 16;
 
+/// How long the descriptor naming a key under the older kind of policy is.
+pub const DESCRIPTOR_BYTES: usize = 8;
+
+/// How a key is named: by the identifier the kernel works out from its
+/// bytes, which is what the newer kind of policy uses, or by a descriptor
+/// the phone chose, which is what the older kind uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Naming {
+    Descriptor([u8; DESCRIPTOR_BYTES]),
+    Identifier,
+}
+
 /// Let `raw` into the filesystem mounted at `mount`, and give the name the
 /// kernel knows it by. Every file whose directory names that key can be
 /// read from then on.
 #[cfg(target_os = "android")]
 pub fn add_key(mount: &Path, raw: &[u8], wrapped: bool) -> Result<[u8; NAME_BYTES]> {
+    add_key_named(mount, raw, wrapped, Naming::Identifier)
+}
+
+/// Let `raw` into the filesystem mounted at `mount` under the name `naming`
+/// gives it, and give the name the kernel knows it by.
+#[cfg(target_os = "android")]
+pub fn add_key_named(mount: &Path, raw: &[u8], wrapped: bool, naming: Naming) -> Result<[u8; NAME_BYTES]> {
     use std::os::fd::AsRawFd;
-    /// The request's fixed part, before the key itself.
+    /// The request's fixed part, before the key itself, on a kernel of a
+    /// version before the one that added the flags after it.
     const HEADER_BYTES: usize = 80;
-    /// The key is named by what the kernel makes of it rather than by
-    /// anything this side chooses.
+    const BY_DESCRIPTOR: u32 = 1;
     const BY_IDENTIFIER: u32 = 2;
     /// The key is one only the storage hardware can unwrap.
     const HARDWARE_WRAPPED: u32 = 1;
     const ADD_KEY: u32 = 0xc050_6617;
 
     let mut arg = vec![0u8; HEADER_BYTES + raw.len()];
-    arg[0..4].copy_from_slice(&BY_IDENTIFIER.to_ne_bytes());
+    match naming {
+        Naming::Descriptor(descriptor) => {
+            arg[0..4].copy_from_slice(&BY_DESCRIPTOR.to_ne_bytes());
+            arg[8..8 + DESCRIPTOR_BYTES].copy_from_slice(&descriptor);
+        }
+        Naming::Identifier => arg[0..4].copy_from_slice(&BY_IDENTIFIER.to_ne_bytes()),
+    }
     arg[40..44].copy_from_slice(&(raw.len() as u32).to_ne_bytes());
     if wrapped {
         arg[76..80].copy_from_slice(&HARDWARE_WRAPPED.to_ne_bytes());
@@ -37,6 +64,49 @@ pub fn add_key(mount: &Path, raw: &[u8], wrapped: bool) -> Result<[u8; NAME_BYTE
     let mut name = [0u8; NAME_BYTES];
     name.copy_from_slice(&arg[8..8 + NAME_BYTES]);
     Ok(name)
+}
+
+/// The way the files under `dir` are encrypted, as far as the kernel says:
+/// the version of the policy, and the descriptor that names its key where
+/// the policy is the older kind.
+#[cfg(target_os = "android")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    pub version: u8,
+    pub descriptor: Option<[u8; DESCRIPTOR_BYTES]>,
+}
+
+/// Read how `dir` is encrypted; `None` where it is not encrypted under any
+/// policy of its own.
+#[cfg(target_os = "android")]
+pub fn policy_of(dir: &Path) -> Result<Option<Policy>> {
+    use std::os::fd::AsRawFd;
+    const GET_POLICY: u32 = 0xc009_6616;
+    /// The largest policy there is: its version, three bytes of how it
+    /// encrypts, four reserved, and the key's name.
+    const POLICY_BYTES: usize = 24;
+
+    let folder = std::fs::File::open(dir).with_context(|| format!("open {}", dir.display()))?;
+    let mut raw = [0u8; 8 + POLICY_BYTES];
+    raw[..8].copy_from_slice(&(POLICY_BYTES as u64).to_ne_bytes());
+    if unsafe { libc::ioctl(folder.as_raw_fd(), GET_POLICY as libc::Ioctl, raw.as_mut_ptr()) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::ENODATA) {
+            return Ok(None);
+        }
+        return Err(e).with_context(|| format!("read how {} is encrypted", dir.display()));
+    }
+    let body = &raw[8..];
+    let version = body[0];
+    let descriptor = match version {
+        0 => {
+            let mut d = [0u8; DESCRIPTOR_BYTES];
+            d.copy_from_slice(&body[4..4 + DESCRIPTOR_BYTES]);
+            Some(d)
+        }
+        _ => None,
+    };
+    Ok(Some(Policy { version, descriptor }))
 }
 
 /// Whether the names and contents under `dir` read as they are: it is not
@@ -55,25 +125,23 @@ pub fn unlocked(dir: &Path) -> Result<bool> {
     const POLICY_BYTES: usize = 24;
     const PRESENT: u32 = 2;
 
+    let Some(policy) = policy_of(dir)? else { return Ok(true) };
     let folder = std::fs::File::open(dir).with_context(|| format!("open {}", dir.display()))?;
-    let mut policy = [0u8; 8 + POLICY_BYTES];
-    policy[..8].copy_from_slice(&(POLICY_BYTES as u64).to_ne_bytes());
-    if unsafe { libc::ioctl(folder.as_raw_fd(), GET_POLICY as libc::Ioctl, policy.as_mut_ptr()) } != 0 {
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() == Some(libc::ENODATA) {
-            return Ok(true);
-        }
-        return Err(e).with_context(|| format!("read how {} is encrypted", dir.display()));
+    let mut raw = [0u8; 8 + POLICY_BYTES];
+    raw[..8].copy_from_slice(&(POLICY_BYTES as u64).to_ne_bytes());
+    if unsafe { libc::ioctl(folder.as_raw_fd(), GET_POLICY as libc::Ioctl, raw.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("read how {} is encrypted", dir.display()));
     }
+    let body = &raw[8..];
     let mut status = [0u8; 128];
-    match policy[8] {
+    match policy.version {
         0 => {
             status[..4].copy_from_slice(&BY_DESCRIPTOR.to_ne_bytes());
-            status[8..16].copy_from_slice(&policy[12..20]);
+            status[8..16].copy_from_slice(&body[4..12]);
         }
         2 => {
             status[..4].copy_from_slice(&BY_IDENTIFIER.to_ne_bytes());
-            status[8..8 + NAME_BYTES].copy_from_slice(&policy[16..16 + NAME_BYTES]);
+            status[8..8 + NAME_BYTES].copy_from_slice(&body[8..8 + NAME_BYTES]);
         }
         other => bail!("{} is encrypted under a policy of version {other}, which is not known here", dir.display()),
     }
@@ -102,6 +170,16 @@ pub fn recorded_name(path: &Path) -> Result<[u8; NAME_BYTES]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The descriptor the older kind of policy names a key by is the eight
+    /// bytes the phone chose, taken as they lie.
+    #[test]
+    fn the_older_kind_of_policy_names_its_key_by_its_descriptor() {
+        assert_eq!(DESCRIPTOR_BYTES, 8);
+        let descriptor = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef];
+        assert_eq!(Naming::Descriptor(descriptor), Naming::Descriptor(descriptor));
+        assert_ne!(Naming::Descriptor(descriptor), Naming::Identifier);
+    }
 
     #[test]
     fn a_phone_says_whether_the_hardware_holds_the_keys() {

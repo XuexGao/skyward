@@ -36,7 +36,7 @@ pub fn hash_with_prefix(prefix: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 /// Where a wrapped key's wrapping comes from.
-pub enum Unwrap<'a, K: Decryptor> {
+pub enum Unwrap<'a, K: Decryptor + ?Sized> {
     /// The phone's key service holds the wrapping key in hardware. Nothing
     /// the user knows is needed, so this is how the metadata key and the
     /// keys for data that is readable before anyone signs in are kept.
@@ -100,7 +100,7 @@ impl StoredKey {
     }
 
     /// The key itself.
-    pub fn unwrap<K: Decryptor>(&self, how: Unwrap<K>) -> Result<Vec<u8>> {
+    pub fn unwrap<K: Decryptor + ?Sized>(&self, how: Unwrap<K>) -> Result<Vec<u8>> {
         if self.encrypted.len() < NONCE_BYTES + TAG_BYTES {
             bail!("the wrapped key is {} bytes, too few to hold anything", self.encrypted.len());
         }

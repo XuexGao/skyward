@@ -728,6 +728,15 @@ fn recovery() -> Result<()> {
             Ok(ms) => skyward_sys::kmsg(&format!("clock set to {} ms from the RTC and persist", ms))?,
             Err(e) => skyward_sys::kmsg(&format!("clock not set: {e:#}"))?,
         }
+        // Which kind of key service the phone serves decides whether its
+        // data partition can be opened at all, and the two are reached over
+        // different drivers, so which one answered goes to the kernel log
+        // beside everything else the recovery says as it comes up.
+        #[cfg(target_os = "android")]
+        match decrypt::key_service() {
+            Ok(said) => skyward_sys::kmsg(&format!("the key service is {said}"))?,
+            Err(e) => skyward_sys::kmsg(&format!("no key service answered: {e}"))?,
+        }
         // The kernel starts every core at its top frequency, and keeps idle
         // ones from powering down, until the phone's own system boots and
         // changes that; left so, the phone drains its battery with the

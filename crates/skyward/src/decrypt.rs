@@ -6,6 +6,8 @@ use anyhow::{Context, Result};
 use skyward_binder::driver::Binder;
 use skyward_crypto::data::{self, Closed, Opening};
 use skyward_crypto::keymint::KeyMint;
+use skyward_crypto::keymaster::Keymaster;
+use skyward_crypto::KeyService;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
@@ -80,11 +82,26 @@ impl Drop for Decryptor {
 
 /// Do `work` with the phone's key service, reached afresh for it, and say
 /// why it failed in words for the page.
-pub fn with_key_service<T>(work: impl FnOnce(&KeyMint) -> Result<T>) -> Result<T, String> {
+///
+/// A phone built from Android 11 on serves the newer `IKeyMintDevice`, and
+/// one built before it serves the older `IKeymasterDevice` 3.0, as the OPPO
+/// R9s and A57 do. Which one it is decides which driver the service is
+/// reached over, so the newer is looked for first and the older after it.
+pub fn with_key_service<T>(work: impl FnOnce(&dyn KeyService) -> Result<T>) -> Result<T, String> {
     let done = (|| {
         let binder = Binder::open()?;
-        let service = KeyMint::open(&binder)?;
+        if let Ok(service) = KeyMint::open(&binder) {
+            return work(&service);
+        }
+        let hardware = Binder::hardware()?;
+        let service = Keymaster::open(&hardware)?;
         work(&service)
     })();
     done.map_err(|e| format!("{e:#}"))
+}
+
+/// Which key service the phone serves, for the kernel log: the newer kind,
+/// the older kind, or why neither answered.
+pub fn key_service() -> Result<String, String> {
+    with_key_service(|service| service.described())
 }

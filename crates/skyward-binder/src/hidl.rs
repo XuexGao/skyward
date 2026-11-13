@@ -60,8 +60,27 @@ impl Message {
         self.data.extend_from_slice(&v.to_le_bytes());
     }
 
+    /// A 64-bit number, which the phone's own writer puts on a boundary of
+    /// eight: it writes every number the same way, and a value wider than
+    /// a word is padded up to its own width first.
     pub fn u64(&mut self, v: u64) {
+        while !self.data.len().is_multiple_of(8) {
+            self.data.push(0);
+        }
         self.data.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// Where the values stand now, for [`Message::fill`] to come back to.
+    pub fn mark(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Write at `mark` how many bytes were written since it, which is how a
+    /// structure says how long its own fields are. The four bytes counted
+    /// are the ones the length itself takes.
+    pub fn fill(&mut self, mark: usize) {
+        let length = (self.data.len() - mark - 4) as u32;
+        self.data[mark..mark + 4].copy_from_slice(&length.to_le_bytes());
     }
 
     /// A run of bytes: the frame that says where they are, then an address
@@ -106,6 +125,10 @@ impl Message {
     /// the one pointing inside it to name.
     fn address(&mut self, at: u64, length: usize, inside: Option<usize>) -> usize {
         let which = self.addresses.len();
+        // An address is one of the values, so it goes where a value goes.
+        while !self.data.len().is_multiple_of(WORD as usize) {
+            self.data.push(0);
+        }
         self.addresses.push(self.data.len() as u64);
         self.data.extend_from_slice(&ADDRESS.to_le_bytes());
         self.data.extend_from_slice(&inside.map_or(0, |_| INSIDE_ANOTHER).to_le_bytes());
@@ -139,6 +162,10 @@ pub struct Answer<'a> {
     at: usize,
 }
 
+/// A structure the far side wrote, as the two numbers that say it is there
+/// and how long it is.
+pub type Structure = usize;
+
 impl<'a> Answer<'a> {
     pub fn new(data: &'a [u8]) -> Answer<'a> {
         Answer { data, at: 0 }
@@ -164,6 +191,71 @@ impl<'a> Answer<'a> {
     /// A truth value: a byte, padded to four as everything is.
     pub fn bool(&mut self) -> Result<bool> {
         Ok(self.take(4)?[0] != 0)
+    }
+
+    /// A count the far side wrote before a list.
+    pub fn count(&mut self) -> Result<u32> {
+        Ok(self.i32()? as u32)
+    }
+
+    /// A 64-bit number, which the far side puts on a boundary of eight:
+    /// whatever room is left of a word before it is passed over.
+    pub fn number(&mut self) -> Result<u64> {
+        if !self.at.is_multiple_of(8) {
+            let skip = 8 - self.at % 8;
+            self.take(skip).context("step over the room before a number")?;
+        }
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("eight bytes")))
+    }
+
+    /// Open a structure the far side wrote: it is there, and its own fields
+    /// are this many bytes long. The bytes it covers run to
+    /// [`Answer::go`]; the two words that say so are not counted.
+    pub fn structure(&mut self) -> Result<Structure> {
+        let there = self.i32().context("read whether a structure is there")?;
+        if there == 0 {
+            bail!("the far side left out a structure");
+        }
+        let length = self.i32().context("read how long a structure is")?;
+        if length < 0 {
+            bail!("a structure says it is {length} bytes long");
+        }
+        Ok(self.at + length as usize)
+    }
+
+    /// Step to the end of a structure, past whatever was left unread of it.
+    pub fn go(&mut self, end: Structure) -> Result<()> {
+        if end > self.data.len() || end < self.at {
+            bail!("a structure ends at {end}, and what is read is at {} of {}", self.at, self.data.len());
+        }
+        self.at = end;
+        Ok(())
+    }
+
+    /// A list of key parameters, each a structure of its own: a tag, and
+    /// the value that came with it.
+    pub fn parameters(&mut self) -> Result<Vec<Parameter>> {
+        let mut out = Vec::new();
+        let count = self.count().context("read how many parameters there are")?;
+        for _ in 0..count {
+            let end = self.structure().context("read a parameter")?;
+            let tag = self.count().context("read what a parameter is tagged with")?;
+            let parameter = match tag >> 28 {
+                // An enumeration, an integer, a truth value and a
+                // repeatable number are all one word.
+                1 | 2 | 3 | 4 | 7 => Parameter { tag: tag & 0x0fff_ffff, number: Some(self.i32()? as i64), bytes: None },
+                // A long or a date is two.
+                5 | 6 | 10 => Parameter { tag: tag & 0x0fff_ffff, number: Some(self.number()? as i64), bytes: None },
+                // A big number is its length and then its digits.
+                8 => Parameter { tag: tag & 0x0fff_ffff, number: Some(self.pointed()?.len() as i64), bytes: None },
+                // Bytes are a run of them.
+                9 => Parameter { tag: tag & 0x0fff_ffff, number: None, bytes: Some(self.pointed()?.to_vec()) },
+                other => bail!("a parameter is tagged {other:#x}, which is no kind of value"),
+            };
+            self.go(end).context("step to the end of a parameter")?;
+            out.push(parameter);
+        }
+        Ok(out)
     }
 
     /// The bytes an address in the reply points at. The driver has already
@@ -214,6 +306,19 @@ impl<'a> Answer<'a> {
         self.at = end;
         Ok(out)
     }
+}
+
+/// One of the parameters the key service answers with: what it is tagged
+/// with, and the value that came with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Parameter {
+    /// The tag's number, without the kind of value it carries.
+    pub tag: u32,
+    /// The number it carries, where it carries one: an enumeration, an
+    /// integer, a long, a date, or the length of a big number.
+    pub number: Option<i64>,
+    /// The bytes it carries, where it carries bytes.
+    pub bytes: Option<Vec<u8>>,
 }
 
 /// The hardware service serving `interface` as `instance`, or `None` while
@@ -300,6 +405,47 @@ mod tests {
         assert_eq!(u64::from_le_bytes(m.data[16..24].try_into().unwrap()), 1 << 40);
     }
 
+    /// The interface's own writer puts a value wider than a word on a
+    /// boundary of its width. A method number takes a word, so a call whose
+    /// interface name leaves the values four bytes in from a boundary lands
+    /// its number where an unaligned write would go wrong.
+    #[test]
+    fn a_number_wider_than_a_word_goes_on_a_boundary_of_its_own_width() {
+        // Fifteen characters and a terminator: the values start at 16, and
+        // one word after that is 20, which is not a boundary of eight.
+        let mut m = Message::call("abcdefghijklmno");
+        assert_eq!(m.data.len(), 16, "the name, its terminator, and padding to four");
+        m.u32(10);
+        assert_eq!(m.data.len(), 20);
+        m.u64(0x0102_0304_0506_0708);
+        assert_eq!(m.data.len(), 20 + 4 + 8, "four bytes of padding, then the number");
+        assert_eq!(&m.data[20..24], &[0, 0, 0, 0], "the padding is zeros");
+        assert_eq!(u64::from_le_bytes(m.data[24..32].try_into().unwrap()), 0x0102_0304_0506_0708);
+    }
+
+    /// A number already on a boundary takes no padding in front of it.
+    #[test]
+    fn a_number_already_on_a_boundary_is_not_moved() {
+        let mut m = Message::call("a.b@1.0::IC");
+        m.u32(10);
+        assert_eq!(m.data.len(), 16, "a boundary of eight already");
+        m.u64(7);
+        assert_eq!(m.data.len(), 24, "no padding before it");
+        assert_eq!(u64::from_le_bytes(m.data[16..24].try_into().unwrap()), 7);
+    }
+
+    /// An address is one of the values, and the interface's own writer
+    /// keeps its addresses on boundaries of eight as well.
+    #[test]
+    fn an_address_starts_on_a_boundary_of_eight() {
+        let mut m = Message::call("a.b@1.0::IC");
+        m.u32(1);
+        m.bytes(&[9; 4]);
+        for at in &m.addresses {
+            assert_eq!(at % 8, 0, "an address at {at} is not on a boundary of eight");
+        }
+    }
+
     #[test]
     fn bytes_are_written_as_a_frame_and_the_bytes_it_points_at() {
         let mut m = Message::call("a.b@1.0::IC");
@@ -332,6 +478,127 @@ mod tests {
         let in_frame = u64::from_le_bytes(parts[0].2[0..8].try_into().unwrap());
         let raw = &m.data[m.addresses[1] as usize..];
         assert_eq!(in_frame, u64::from_le_bytes(raw[8..16].try_into().unwrap()));
+    }
+
+    /// A reply as the key service writes one: a status that says the call
+    /// went through, then what the method answers.
+    fn reply(fields: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+        let mut out = 0i32.to_le_bytes().to_vec();
+        fields(&mut out);
+        out
+    }
+
+    #[test]
+    fn a_structure_says_that_it_is_there_and_how_long_its_own_fields_are() {
+        let data = reply(|p| {
+            p.extend_from_slice(&1i32.to_le_bytes());
+            // Eight bytes of its own: two words, which is what the length
+            // counts. The two words that say so are not counted.
+            p.extend_from_slice(&8i32.to_le_bytes());
+            p.extend_from_slice(&7u32.to_le_bytes());
+            p.extend_from_slice(&9u32.to_le_bytes());
+        });
+        let mut read = Answer::new(&data);
+        read.status().unwrap();
+        let end = read.structure().unwrap();
+        assert_eq!(end, 20, "the status and the structure's own two words, then its eight bytes");
+        assert_eq!(read.count().unwrap(), 7);
+        read.go(end).unwrap();
+    }
+
+    #[test]
+    fn a_structure_the_far_side_left_out_is_an_error() {
+        let data = reply(|p| p.extend_from_slice(&0i32.to_le_bytes()));
+        let mut read = Answer::new(&data);
+        read.status().unwrap();
+        assert!(read.structure().is_err());
+    }
+
+    /// The numbers in a reply are laid out as the instructions say: a
+    /// value wider than a word goes on a boundary of its own width.
+    #[test]
+    fn a_number_in_a_reply_is_read_from_its_own_boundary() {
+        // Four bytes of status, then one word, then the room left before a
+        // boundary of eight, then the number.
+        let data = reply(|p| {
+            p.extend_from_slice(&1u32.to_le_bytes());
+            p.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
+        });
+        let mut read = Answer::new(&data);
+        read.status().unwrap();
+        assert_eq!(read.number().unwrap(), 0x0102_0304_0506_0708);
+
+        // One word after the status puts the next number four bytes in, so
+        // the room left of the word before it goes by first.
+        let shifted = reply(|p| {
+            p.extend_from_slice(&1u32.to_le_bytes());
+            p.extend_from_slice(&[0; 4]);
+            p.extend_from_slice(&7u64.to_le_bytes());
+        });
+        let mut read = Answer::new(&shifted);
+        read.status().unwrap();
+        assert_eq!(read.count().unwrap(), 1, "the word before the number");
+        assert_eq!(read.number().unwrap(), 7, "and the number after it");
+    }
+
+    #[test]
+    fn a_parameter_is_read_with_the_kind_of_value_it_carries() {
+        // An enumeration tag is twenty-eight bits of kind and a number; a
+        // long carries two words.
+        let enum_tag = ((1u32 << 28) | 4).to_le_bytes();
+        let long_tag = ((5u32 << 28) | 200).to_le_bytes();
+        let data = reply(|p| {
+            p.extend_from_slice(&2u32.to_le_bytes());
+            // A parameter's own fields: its tag, then its value. Each is a
+            // structure of its own, and says how long it is.
+            let mut first = enum_tag.to_vec();
+            first.extend_from_slice(&32u32.to_le_bytes());
+            p.extend_from_slice(&1i32.to_le_bytes());
+            p.extend_from_slice(&(first.len() as i32).to_le_bytes());
+            p.extend_from_slice(&first);
+            // A long is written on a boundary of eight, so the room left of
+            // the word before it goes by first.
+            let mut second = long_tag.to_vec();
+            second.extend_from_slice(&[0; 4]);
+            second.extend_from_slice(&65537u64.to_le_bytes());
+            p.extend_from_slice(&1i32.to_le_bytes());
+            p.extend_from_slice(&(second.len() as i32).to_le_bytes());
+            p.extend_from_slice(&second);
+        });
+        let mut read = Answer::new(&data);
+        read.status().unwrap();
+        let params = read.parameters().unwrap();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], Parameter { tag: 4, number: Some(32), bytes: None }, "a block mode of GCM");
+        assert_eq!(params[1], Parameter { tag: 200, number: Some(65537), bytes: None }, "an RSA public exponent");
+    }
+
+    #[test]
+    fn a_parameter_of_no_known_kind_is_an_error() {
+        let tag = (0u32 << 28).to_le_bytes();
+        let data = reply(|p| {
+            p.extend_from_slice(&1u32.to_le_bytes());
+            p.extend_from_slice(&1i32.to_le_bytes());
+            p.extend_from_slice(&8i32.to_le_bytes());
+            p.extend_from_slice(&tag);
+            p.extend_from_slice(&0u32.to_le_bytes());
+        });
+        let mut read = Answer::new(&data);
+        read.status().unwrap();
+        assert!(read.parameters().is_err());
+    }
+
+    #[test]
+    fn a_structure_says_how_long_its_own_fields_are() {
+        let mut m = Message::call("a.b@1.0::IC");
+        m.u32(4);
+        let at = m.mark();
+        m.u32(0);
+        m.u32(7);
+        m.u32(9);
+        m.fill(at);
+        let length = u32::from_le_bytes(m.data[at..at + 4].try_into().unwrap());
+        assert_eq!(length, 8, "the two words after the length, and not the length itself");
     }
 
     #[test]

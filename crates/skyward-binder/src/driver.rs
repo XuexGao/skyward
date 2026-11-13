@@ -279,6 +279,12 @@ impl<'a> Handle<'a> {
     pub fn transact(&self, code: u32, data: &impl Payload) -> Result<Reply<'a>> {
         self.binder.transact(self.handle, code, data)
     }
+
+    /// The number the object is known by in its own process, for a call
+    /// that hands an object over as one of its values.
+    pub fn number(&self) -> u32 {
+        self.handle
+    }
 }
 
 impl Drop for Handle<'_> {
