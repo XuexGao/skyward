@@ -194,7 +194,7 @@ pub fn report(credential: Option<&str>, user: u32, clean: bool) -> Result<()> {
             skyward_crypto::fscrypt::policy_of(std::path::Path::new(probe)).map(|p| match p {
                 Some(p) => format!("version {}, descriptor {:?}", p.version, p.descriptor),
                 None => "none of its own".to_string(),
-            }).map_err(anyhow::Error::from),
+            }),
         );
     }
     let mode = std::fs::read_to_string("/data/unencrypted/mode");

@@ -1477,11 +1477,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         if backlight.as_ref().is_some_and(|b| b.level == 0) && panel.is_some() {
             surface.settle()?;
         }
-        match &mut backlight {
-            Some(backlight) => backlight.show(panel)?,
-            // Without a switch of its own the panel is left as it is, lit by
-            // whatever the bootloader left it at.
-            None => {}
+        // Without a switch of its own the panel is left as it is, lit by
+        // whatever the bootloader left it at.
+        if let Some(backlight) = &mut backlight {
+            backlight.show(panel)?;
         }
         if panel.is_some() {
             // Lit, a panel that came on again switches to its fastest
