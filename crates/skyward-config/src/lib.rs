@@ -662,6 +662,39 @@ impl DeviceConfig {
 mod tests {
     use super::*;
 
+    /// The programs of the OPPO phones that hold and check the keys are the
+    /// ones their vendor partition actually carries, at the paths it
+    /// carries them: the hardware services in `hw`, the daemon beside the
+    /// rest. A path that is not there leaves the data partition closed, and
+    /// nothing else on the page says why.
+    #[test]
+    fn the_oppo_phones_start_the_key_programs_their_vendor_partition_carries() {
+        for (text, codename) in [
+            (include_str!("../../../devices/r9s.toml"), "r9s"),
+            (include_str!("../../../devices/a57.toml"), "a57"),
+        ] {
+            let cfg = DeviceConfig::parse(text).unwrap();
+            assert_eq!(cfg.device.codename, codename);
+            assert!(!cfg.device.ab, "the phone keeps one system, not two slots");
+            let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
+            for want in [
+                "/vendor/bin/qseecomd",
+                "/vendor/bin/hw/android.hardware.keymaster@3.0-service",
+                "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service",
+            ] {
+                assert!(paths.contains(&want), "{codename} does not start {want}");
+            }
+            // The daemon registers the listeners the secure world calls
+            // back through, so it comes before both services, which say
+            // they are up by registering with the hardware directory.
+            let order = |p: &str| paths.iter().position(|s| *s == p).unwrap();
+            assert!(order("/vendor/bin/qseecomd") < order("/vendor/bin/hw/android.hardware.keymaster@3.0-service"));
+            for s in cfg.services.iter().filter(|s| s.path.contains("@3.0-service") || s.path.contains("@1.0-service")) {
+                assert!(s.ready_hardware_service.is_some(), "{} is waited for", s.path);
+            }
+        }
+    }
+
     #[test]
     fn the_commands_sit_beside_the_recovery_service_binary() {
         let folder = |path: &str| Path::new(path).parent().map(Path::to_path_buf);
