@@ -86,22 +86,61 @@ impl Drop for Decryptor {
 /// A phone built from Android 11 on serves the newer `IKeyMintDevice`, and
 /// one built before it serves the older `IKeymasterDevice` 3.0, as the OPPO
 /// R9s and A57 do. Which one it is decides which driver the service is
-/// reached over, so the newer is looked for first and the older after it.
+/// reached over, so the newer is tried first and the older after it.
+///
+/// Being registered is not the same as answering: a phone whose secure world
+/// only speaks the older interface can still have something registered under
+/// the newer one's name, put there to translate between them, and that
+/// translation is what a recovery has none of. So each is asked something
+/// that changes nothing before its answer is used, and one that does not
+/// answer is passed over for the next.
 pub fn with_key_service<T>(work: impl FnOnce(&dyn KeyService) -> Result<T>) -> Result<T, String> {
-    let done = (|| {
-        let binder = Binder::open()?;
-        if let Ok(service) = KeyMint::open(&binder) {
-            return work(&service);
-        }
-        let hardware = Binder::hardware()?;
-        let service = Keymaster::open(&hardware)?;
-        work(&service)
-    })();
+    let done = try_key_services(work);
     done.map_err(|e| format!("{e:#}"))
 }
+
+/// Do `work` with the first key service that answers: the newer kind, then
+/// the older.
+///
+/// A handle borrows the driver it was reached through, so each attempt keeps
+/// both for as long as it uses them, and the work is handed over only once a
+/// service has answered something that changes nothing.
+fn try_key_services<T>(work: impl FnOnce(&dyn KeyService) -> Result<T>) -> Result<T> {
+    let mut work = Some(work);
+    let mut refusals = Vec::new();
+    if let Ok(binder) = Binder::open() {
+        if let Ok(service) = KeyMint::open(&binder) {
+            if service.hardware().context("ask the newer key service about itself").is_ok() {
+                return (work.take().expect("the work is done once"))(&service);
+            }
+            refusals.push("the newer key service: it did not say what it is".to_string());
+        } else {
+            refusals.push(format!("the newer key service: {SERVICE_NEWER} is not running"));
+        }
+    } else {
+        refusals.push("the newer key service: the driver it is reached over is not here".to_string());
+    }
+    match Binder::hardware() {
+        Ok(hardware) => match Keymaster::open(&hardware) {
+            Ok(service) => match service.features() {
+                Ok(_) => (work.take().expect("the work is done once"))(&service),
+                Err(e) => anyhow::bail!("no key service answered; {}; the older one: {e:#}", refusals.join("; ")),
+            },
+            Err(e) => anyhow::bail!("no key service answered; {}; the older one: {e:#}", refusals.join("; ")),
+        },
+        Err(e) => anyhow::bail!(
+            "no key service answered; {}; the older one, over the hardware driver: {e:#}",
+            refusals.join("; ")
+        ),
+    }
+}
+
+/// The name the newer key service registers under, for the log.
+const SERVICE_NEWER: &str = skyward_crypto::keymint::SERVICE;
 
 /// Which key service the phone serves, for the kernel log: the newer kind,
 /// the older kind, or why neither answered.
 pub fn key_service() -> Result<String, String> {
     with_key_service(|service| service.described())
 }
+
