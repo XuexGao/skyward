@@ -38,6 +38,32 @@ version = "lineage-22.1-20260715"
 image = "https://github.com/BlueyfishReleases/A57/releases/download/lineage-22.1-20260715-UNOFFICIAL-A57/recovery.img"
 recovery = "4fb32feb0cea3f1b800a0ea014a45d15bab3dce10846914c32353e97b42d3959"
 
+# The secure world is reached from the system through these, and without
+# them the data partition cannot be opened: the daemon below registers the
+# listeners it calls back through, and the two services above it hold the
+# keys and check screen locks. They are the phone's own programs, run as
+# its own init runs them.
+[[service]]
+path = "/vendor/bin/qseecomd"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_property = "vendor.sys.listeners.registered"
+user = "root"
+groups = ["root", "drmrpc"]
+
+[[service]]
+path = "/vendor/bin/hw/android.hardware.keymaster@3.0-service"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_hardware_service = "android.hardware.keymaster@3.0::IKeymasterDevice/default"
+user = "root"
+groups = ["root"]
+
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_hardware_service = "android.hardware.gatekeeper@1.0::IGatekeeper/default"
+user = "root"
+groups = ["root"]
+
 # The partitions a backup of the baseband and EFS takes. The sensors'
 # calibration is in persist.
 [backup]
