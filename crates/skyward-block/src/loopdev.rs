@@ -14,7 +14,17 @@ mod android {
     const CONTROL: &str = "/dev/loop-control";
 
     const GET_FREE: u32 = 0x4C82;
-    const CONFIGURE: u32 = 0x4C0A;
+    /// Bind a file to the device and then describe the part of it to read.
+    /// Both go back to the oldest loop driver; `LOOP_CONFIGURE`, which does
+    /// the two at once, arrived in Linux 5.8, and on the 4.19 kernels of the
+    /// older phones it may answer as though it worked while the device reads
+    /// nothing at all. Every kernel since accepts these two.
+    const SET_FD: u32 = 0x4C00;
+    const SET_STATUS64: u32 = 0x4C04;
+    /// A recovery's init may have left a loop device bound to nothing; clear
+    /// it before binding our file, or the old association wins and every
+    /// read of the new one answers with nothing at all.
+    const CLR_FD: u32 = 0x4C01;
 
     /// The device only ever reads. It stays pointed at the file until the
     /// recovery ends, which is as long as anything mounted from it lasts.
@@ -39,14 +49,6 @@ mod android {
         init: [u64; 2],
     }
 
-    #[repr(C)]
-    struct Config {
-        fd: u32,
-        block_size: u32,
-        info: Info,
-        reserved: [u64; 8],
-    }
-
     /// Open `file` from `offset` for `length` bytes as a block device, and
     /// give its path. The device goes away once whatever is mounted from it
     /// is unmounted.
@@ -58,18 +60,39 @@ mod android {
             return Err(std::io::Error::last_os_error()).context("ask for a free loop device");
         }
         let path = free_device(number as u32)?;
+        // Opened read-only on purpose: a device opened for writing and then
+        // turned read-only by the status below stops reading altogether on
+        // the older kernels, while one opened read-only reads from the
+        // start. The status still says read-only, which agrees with the
+        // mode the device was opened with, and nothing has to switch.
         let device = File::options()
             .read(true)
-            .write(true)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
-        let mut config: Config = unsafe { std::mem::zeroed() };
-        config.fd = backing.as_raw_fd() as u32;
-        config.info.offset = offset;
-        config.info.size_limit = length;
-        config.info.flags = READ_ONLY;
-        if unsafe { libc::ioctl(device.as_raw_fd(), CONFIGURE as libc::Ioctl, &mut config) } < 0 {
-            return Err(std::io::Error::last_os_error()).with_context(|| format!("point {} at {}", path.display(), file.display()));
+        // A device the kernel handed out as free may still carry an old
+        // association from an earlier boot stage. Clear it first; binding
+        // over one leaves every read answering with nothing on the older
+        // kernels. An unbound device answers ENXIO, which is of no concern.
+        let _ = unsafe { libc::ioctl(device.as_raw_fd(), CLR_FD as libc::Ioctl) };
+        // Bind the file first. Every loop driver answers this one; the single
+        // ioctl that both binds and describes the device does not exist on
+        // the older kernels and can leave one that reads back nothing.
+        let fd = backing.as_raw_fd();
+        if unsafe { libc::ioctl(device.as_raw_fd(), SET_FD as libc::Ioctl, fd) } < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| format!("bind {} to {}", file.display(), path.display()));
+        }
+        let mut info: Info = unsafe { std::mem::zeroed() };
+        info.offset = offset;
+        info.size_limit = length;
+        info.flags = READ_ONLY;
+        // The older driver keeps the backing file by this name; leaving it
+        // empty makes the device read nothing and show no file at all.
+        let name = file.to_string_lossy();
+        let bytes = name.as_bytes();
+        let n = bytes.len().min(info.file_name.len() - 1);
+        info.file_name[..n].copy_from_slice(&bytes[..n]);
+        if unsafe { libc::ioctl(device.as_raw_fd(), SET_STATUS64 as libc::Ioctl, &mut info) } < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| format!("describe {} on {}", file.display(), path.display()));
         }
         Ok(path)
     }

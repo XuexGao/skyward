@@ -30,6 +30,36 @@ diagonal = 5.2
 sources = []
 load = []
 
+# The WCNSS (Wi-Fi/Bluetooth) processor is booted by the kernel from a set
+# of signed images (wcnss.mdt and its .b00..b12 segments) that live in the
+# modem partition, which a recovery otherwise never mounts. Without them
+# ueventd cannot answer the firmware request, pronto stays OFFLINING and no
+# wlan0 is ever made.
+[firmware]
+partition = "modem"
+
+# The WCNSS chip is an old prima/wcnss part: its WLAN driver is built into
+# the kernel (there is no wlan.ko to load), and wpa_supplicant talks to it
+# over WEXT rather than nl80211. wcnss_service (started below) opens
+# /dev/wcnss_ctrl, which boots pronto and downloads the NV calibration
+# image; the WLAN thread then waits for wlan0 and starts the supplicant.
+[wlan]
+modules = []
+firmware = [
+    # The NV image the kernel asks for by this subpath once pronto is up.
+    # It lives under the board-id folders in the vendor partition, not where
+    # the loader looks, so place it in the recovery's firmware folder.
+    { name = "wlan/prima/WCNSS_qcom_wlan_nv.bin", path = "/vendor/firmware/wlan/16061/WCNSS_qcom_wlan_nv.bin" },
+    { name = "wlan/prima/WCNSS_cfg.dat", path = "/vendor/firmware/wlan/prima/WCNSS_cfg.dat" },
+    { name = "wlan/prima/WCNSS_wlan_dictionary.dat", path = "/vendor/firmware/wlan/prima/WCNSS_wlan_dictionary.dat" },
+]
+interface = "wlan0"
+supplicant = "/vendor/bin/hw/wpa_supplicant"
+libraries = ["/system/lib64", "/vendor/lib64"]
+driver = "wext"
+service = "android.hardware.wifi.supplicant.ISupplicant/default"
+probe = "http://connect.rom.miui.com/generate_204"
+
 # The stock recovery the image is built on: the LineageOS 22.1 recovery of
 # the phone's own latest build, whose init, adbd, SELinux policy and
 # libraries stay.
@@ -38,14 +68,23 @@ version = "lineage-22.1-20260715"
 image = "https://github.com/BlueyfishReleases/A57/releases/download/lineage-22.1-20260715-UNOFFICIAL-A57/recovery.img"
 recovery = "4fb32feb0cea3f1b800a0ea014a45d15bab3dce10846914c32353e97b42d3959"
 
+# The old prima/wcnss radio: this daemon opens /dev/wcnss_ctrl, boots the
+# pronto processor from the images on the modem partition and downloads the
+# NV calibration data. It has to run before anything asks for wlan0.
+[[service]]
+path = "/vendor/bin/wcnss_service"
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "root"
+groups = ["root"]
+
 # The directory the phone's hardware services register with. A recovery
 # carries none of it — it is on the installed system's system partition,
 # which the recovery mounts at /mnt/system — and without it nothing that
 # speaks the older hardware interface can be found at all: every look-up
 # answers that the service is not there.
 [[service]]
-path = "/mnt/system/bin/hwservicemanager"
-libraries = ["/mnt/system/lib64", "/mnt/system/lib64/bootstrap"]
+path = "/system/bin/hwservicemanager"
+libraries = ["/system/lib64", "/vendor/lib64"]
 ready_property = "hwservicemanager.ready"
 user = "root"
 groups = ["root"]

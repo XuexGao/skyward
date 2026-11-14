@@ -7,6 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 mod avb;
+mod described;
 
 use skyward_bootimg::{BootImage, Ramdisk};
 
@@ -77,6 +78,11 @@ enum Cmd {
         /// The monospaced typeface's licence, which goes with it.
         #[arg(long)]
         mono_license: PathBuf,
+        /// System-partition programs kept in the ramdisk so the recovery
+        /// still reaches the phone's secure world after the system is
+        /// wiped; each file keeps the path it has under this folder.
+        #[arg(long)]
+        hw_bundle: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -93,6 +99,25 @@ enum Cmd {
         /// Where to write the stock recovery image.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Take what a device's own partitions say of the programs they carry
+    /// out of its stock build's full update package on its server: the
+    /// init scripts, the service descriptions, the accounts and the build
+    /// properties of each partition that carries such programs, written
+    /// under `out` as the partition and then the path in it. Only the
+    /// parts of the package that hold these files are downloaded, each
+    /// checked against the package's own sum of it.
+    Described {
+        /// The device configuration, devices/<codename>.toml.
+        #[arg(long)]
+        config: PathBuf,
+        /// A partition to take them out of; vendor, odm and system_ext
+        /// when none is named.
+        #[arg(long = "partition")]
+        partitions: Vec<String>,
+        /// The folder to write the files under, which is not there yet.
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -115,7 +140,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, kernel, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, kernel, binary, system_init, config, font, mono, mono_license, hw_bundle, out } => {
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
             // A stock recovery ramdisk has no third-party tree; refuse to build
@@ -154,6 +179,41 @@ fn main() -> Result<()> {
                 rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
             }
             rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
+            // A recovery built on the stock image lacks the loader the phone's
+            // hardware services expect, so point it at the recovery's own
+            // loader; otherwise hwservicemanager, keymaster and gatekeeper
+            // fail to start because their ELF interpreter is missing.
+            if rd.find(paths::BOOTSTRAP_LINKER).is_none() {
+                rd.link(paths::BOOTSTRAP_LINKER, paths::LINKER64)?;
+            }
+            // The phone's hardware services live on its system partition, which
+            // a user may wipe; keep a small bundle of them in the ramdisk so the
+            // recovery still reaches the secure world afterwards. Each file keeps
+            // the path it has under this folder.
+            if let Some(bundle) = &hw_bundle {
+                fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for e in entries.flatten() {
+                            let p = e.path();
+                            if p.is_dir() {
+                                collect(&p, out);
+                            } else if p.is_file() {
+                                out.push(p);
+                            }
+                        }
+                    }
+                }
+                let mut files: Vec<std::path::PathBuf> = Vec::new();
+                collect(bundle, &mut files);
+                for f in files {
+                    let rel = f.strip_prefix(bundle).expect("under the bundle");
+                    let arc = rel.to_string_lossy().replace('\\', "/");
+                    if rd.find(&arc).is_none() {
+                        rd.add(&arc, 0o755, std::fs::read(f)?)?;
+                    }
+                }
+            }
+
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier
@@ -198,6 +258,11 @@ fn main() -> Result<()> {
                 Some(out) => take_stock_recovery(&stock, &out),
                 None => Ok(()),
             }
+        }
+        Cmd::Described { config, partitions, out } => {
+            let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
+            let partitions = if partitions.is_empty() { skyward_programs::phone::PARTITIONS.map(str::to_string).to_vec() } else { partitions };
+            described::take(&stock.package, &partitions, &out)
         }
     }
 }
