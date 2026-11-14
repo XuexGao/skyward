@@ -44,14 +44,8 @@ recovery = "4fb32feb0cea3f1b800a0ea014a45d15bab3dce10846914c32353e97b42d3959"
 # speaks the older hardware interface can be found at all: every look-up
 # answers that the service is not there.
 [[service]]
-path = "/mnt/system/system/system_ext/bin/hwservicemanager"
-libraries = [
-    "/mnt/system/system/lib64",
-    "/mnt/system/system/lib64/bootstrap",
-    "/mnt/system/system/system_ext/lib64",
-    "/system/lib64",
-    "/vendor/lib64",
-]
+path = "/system/bin/hwservicemanager"
+libraries = ["/system/lib64", "/vendor/lib64"]
 ready_property = "hwservicemanager.ready"
 user = "root"
 groups = ["root"]
