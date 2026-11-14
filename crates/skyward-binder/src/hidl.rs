@@ -16,16 +16,18 @@ const ADDRESS: u32 = u32::from_be_bytes([b'p', b't', b'*', 0x85]);
 const OBJECT: u32 = u32::from_be_bytes([b's', b'h', b'*', 0x85]);
 
 /// The bytes this address points at sit inside what another address of the
-/// same call points at.
+/// same call points at, under this flag.
 ///
-/// The word it goes in holds two flags, and the phone's own reader gives
-/// them these values: the first marks a reference to a buffer rather than a
-/// buffer, and it refuses an address marked that way instead of copying it;
-/// the second is the one that says the bytes sit inside another buffer. A
-/// value of one here is the first of those, which is why every call that
-/// carried a name was answered with the complaint that its argument was
-/// worth nothing.
-const INSIDE_ANOTHER: u32 = 2;
+/// The word the flag goes in holds one bit, and phones differ on which bit
+/// it is: the kernel that copies the call and the program that reads it
+/// each have their own name for it, and the two are only ever the same on a
+/// phone built from one tree. So a call that carries bytes is marked with
+/// one of them and made again with the other if the reader refuses it.
+const INSIDE_ANOTHER: u32 = 1;
+
+/// The other place that flag is put: the one a phone whose kernel and whose
+/// system were not built from one tree answers to.
+const INSIDE_ANOTHER_ELSEWHERE: u32 = 2;
 
 /// How much room an address takes among the values.
 const ADDRESS_BYTES: usize = 40;
@@ -38,17 +40,31 @@ const OBJECT_BYTES: usize = 24;
 /// are, how many there are, and whether whoever holds it frees them.
 const FRAME_BYTES: usize = 16;
 
-/// What the driver copies for an address is rounded up to a whole word.
+/// What the driver sets aside and copies for an address is rounded up to a
+/// whole word, which is what the call says it needs room for.
 const WORD: u64 = 8;
+
+/// Where an address stands among the values. The phone's own reader walks
+/// the values from the front, steps over the interface's name to a boundary
+/// of four, and then looks for an address at exactly the place it has
+/// reached: one written anywhere else is not found at all, and the whole
+/// call is refused as though its argument were worth nothing.
+const ALIGN: usize = 4;
 
 /// A call being written. What the addresses point at is kept here too, so
 /// it stays where it is until the driver has read it.
-#[derive(Default)]
 pub struct Message {
     data: Vec<u8>,
     addresses: Vec<u64>,
     held: Vec<Box<[u8]>>,
     pointed: u64,
+    inside: u32,
+}
+
+impl Default for Message {
+    fn default() -> Message {
+        Message { data: Vec::new(), addresses: Vec::new(), held: Vec::new(), pointed: 0, inside: INSIDE_ANOTHER }
+    }
 }
 
 impl Message {
@@ -61,17 +77,22 @@ impl Message {
         m
     }
 
+    /// Mark the bytes that sit inside another with `flag`: a phone whose
+    /// kernel and whose system name that flag with different bits answers
+    /// to one and refuses the other, so a call that is refused is made
+    /// again with the other.
+    pub fn marks_inside_with(&mut self, flag: u32) {
+        self.inside = flag;
+    }
+
     pub fn u32(&mut self, v: u32) {
         self.data.extend_from_slice(&v.to_le_bytes());
     }
 
-    /// A 64-bit number, which the phone's own writer puts on a boundary of
-    /// eight: it writes every number the same way, and a value wider than a
-    /// word is padded up to its own width first.
+    /// A 64-bit number, written where the value before it ended: the
+    /// phone's own writer puts nothing in front of a value, whatever its
+    /// width, and its reader takes each one where the last left off.
     pub fn u64(&mut self, v: u64) {
-        while !self.data.len().is_multiple_of(WORD as usize) {
-            self.data.push(0);
-        }
         self.data.extend_from_slice(&v.to_le_bytes());
     }
 
@@ -130,13 +151,14 @@ impl Message {
     /// the one pointing inside it to name.
     fn address(&mut self, at: u64, length: usize, inside: Option<usize>) -> usize {
         let which = self.addresses.len();
-        // An address is one of the values, so it goes where a value goes.
-        while !self.data.len().is_multiple_of(WORD as usize) {
+        // An address goes exactly where the reader will have walked to, and
+        // it has walked on by whole widths of the values before it.
+        while !self.data.len().is_multiple_of(ALIGN) {
             self.data.push(0);
         }
         self.addresses.push(self.data.len() as u64);
         self.data.extend_from_slice(&ADDRESS.to_le_bytes());
-        self.data.extend_from_slice(&inside.map_or(0, |_| INSIDE_ANOTHER).to_le_bytes());
+        self.data.extend_from_slice(&inside.map_or(0, |_| self.inside).to_le_bytes());
         self.data.extend_from_slice(&at.to_le_bytes());
         self.data.extend_from_slice(&(length as u64).to_le_bytes());
         self.data.extend_from_slice(&(inside.unwrap_or(0) as u64).to_le_bytes());
@@ -347,35 +369,52 @@ pub fn find<'a>(binder: &'a crate::driver::Binder, interface: &str, instance: &s
     const DIRECTORY: &str = "android.hidl.manager@1.0::IServiceManager";
     const GET: u32 = 1;
     let directory = binder.directory()?;
-    let mut call = Message::call(DIRECTORY);
     // The directory is asked for a service by the one name it was told,
     // which is the interface and the instance together: asking it for the
     // two apart finds nothing, because nothing is registered under the
     // interface alone.
-    call.text(&format!("{interface}/{instance}"));
+    let name = format!("{interface}/{instance}");
     // The directory answers only once the daemon that keeps it has taken
     // the driver for its own, and that happens a moment after it starts: a
     // call made before then is refused outright, and the refusal reads the
     // same as an answer that nothing has registered. Make the call again
-    // for a while before believing it, and keep what the driver said.
+    // for a while before believing it, and keep what the driver said. A
+    // phone whose kernel and system name the flag over the bytes with
+    // different bits refuses the whole call, so the other name for it is
+    // tried as well before the look-up is given up on.
     let reply = {
-        let mut tries = 0;
-        loop {
-            match directory.transact(GET, &call) {
-                Ok(reply) => break reply,
-                Err(e) => {
-                    tries += 1;
-                    tell_kernel(&format!(
-                        "look up {interface}/{instance} was refused on try {tries}: {e:#}; the call carries {} bytes over {} addresses",
-                        call.values().len(),
-                        call.addresses().len()
-                    ));
-                    if tries == 5 {
-                        return Err(e).with_context(|| format!("look up {interface}/{instance}"));
+        let mut last = None;
+        let mut answered = None;
+        for flag in [INSIDE_ANOTHER, INSIDE_ANOTHER_ELSEWHERE] {
+            let mut call = Message::call(DIRECTORY);
+            call.marks_inside_with(flag);
+            call.text(&name);
+            for tries in 1..=5 {
+                match directory.transact(GET, &call) {
+                    Ok(reply) => {
+                        answered = Some(reply);
+                        tell_kernel(&format!("{interface}/{instance} answered for a call marked {flag}"));
+                        break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    Err(e) => {
+                        tell_kernel(&format!(
+                            "look up {interface}/{instance} was refused on try {tries} with {}: {e:#}; the call carries {} bytes over {} addresses",
+                            flag,
+                            call.values().len(),
+                            call.addresses().len()
+                        ));
+                        last = Some(e);
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
                 }
             }
+            if answered.is_some() {
+                break;
+            }
+        }
+        match answered {
+            Some(reply) => reply,
+            None => return Err(last.expect("a call that was made")).with_context(|| format!("look up {interface}/{instance}")),
         }
     };
     let mut read = Answer::new(reply.bytes());
@@ -488,26 +527,47 @@ mod tests {
         assert_eq!(u64::from_le_bytes(m.data[24..32].try_into().unwrap()), 0x0102_0304_0506_0708);
     }
 
-    /// A number already on a boundary takes no padding in front of it.
+    /// A number takes no padding in front of it, whatever its width: the
+    /// phone writes one value where the last one ended and reads it there.
     #[test]
-    fn a_number_already_on_a_boundary_is_not_moved() {
+    fn a_number_is_written_where_the_one_before_it_ended() {
         let mut m = Message::call("a.b@1.0::IC");
         m.u32(10);
-        assert_eq!(m.data.len(), 16, "a boundary of eight already");
+        assert_eq!(m.data.len(), 16);
         m.u64(7);
         assert_eq!(m.data.len(), 24, "no padding before it");
         assert_eq!(u64::from_le_bytes(m.data[16..24].try_into().unwrap()), 7);
+        m.u32(1);
+        m.u64(9);
+        assert_eq!(m.data.len(), 36, "a number four bytes in from a boundary takes no padding either");
     }
 
-    /// An address is one of the values, and the interface's own writer
-    /// keeps its addresses on boundaries of eight as well.
+    /// An address is read from the place the values have reached, so it
+    /// stands exactly there: the reader steps over the interface's name to
+    /// a boundary of four, and then reads one address after another with
+    /// nothing between them.
     #[test]
-    fn an_address_starts_on_a_boundary_of_eight() {
+    fn an_address_stands_where_the_reader_walks_to() {
+        // The directory's own name is forty-one characters and a
+        // terminator, which the reader steps over to forty-four.
+        let mut m = Message::call("android.hidl.manager@1.0::IServiceManager");
+        assert_eq!(m.data.len(), 42, "the name and its terminator");
+        m.text("android.hardware.keymaster@3.0::IKeymasterDevice/default");
+        assert_eq!(m.addresses, vec![44, 84], "the frame, then the bytes, back to back");
+        assert_eq!(m.data.len(), 44 + 40 + 40);
+    }
+
+    /// And with a name that already ends on a boundary of four there is no
+    /// room to step over at all.
+    #[test]
+    fn a_name_that_ends_on_a_boundary_is_not_stepped_over() {
         let mut m = Message::call("a.b@1.0::IC");
+        assert_eq!(m.data.len(), 12);
         m.u32(1);
         m.bytes(&[9; 4]);
+        assert_eq!(m.addresses, vec![16, 56]);
         for at in &m.addresses {
-            assert_eq!(at % 8, 0, "an address at {at} is not on a boundary of eight");
+            assert_eq!(at % ALIGN, 0, "an address at {at} is not on a boundary of four");
         }
     }
 
@@ -526,17 +586,18 @@ mod tests {
         assert_eq!(m.pointed, FRAME_BYTES as u64 + WORD, "both rounded up to a word");
     }
 
-    /// The flag a buffer carries when it sits inside another is the second
-    /// of the two the word holds, not the first: the first marks a
-    /// reference, and a reader that finds it set takes the address for
-    /// something it must not copy.
+    /// The bytes of a run carry the flag that says they sit inside another,
+    /// and a call can be marked with the other place that flag is put for a
+    /// phone whose kernel and system do not agree on it.
     #[test]
-    fn the_bytes_of_a_buffer_sit_inside_its_frame_under_the_second_flag() {
-        assert_eq!(INSIDE_ANOTHER, 2);
+    fn the_bytes_of_a_run_carry_the_flag_of_a_buffer_inside_another() {
         let mut m = Message::call("a.b@1.0::IC");
         m.text("default");
-        assert_eq!(written(&m)[1].0 & 1, 0, "the flag of a reference is not set");
-        assert_eq!(written(&m)[1].0, 2, "the flag of a buffer inside another is");
+        assert_eq!(written(&m)[1].0, INSIDE_ANOTHER);
+        let mut other = Message::call("a.b@1.0::IC");
+        other.marks_inside_with(INSIDE_ANOTHER_ELSEWHERE);
+        other.text("default");
+        assert_eq!(written(&other)[1].0, INSIDE_ANOTHER_ELSEWHERE);
     }
 
     #[test]
