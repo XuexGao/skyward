@@ -132,10 +132,41 @@ fn present<T>(r: std::io::Result<T>) -> std::io::Result<Option<T>> {
     }
 }
 
+/// What the port says it is, on one line: the mode the controller names
+/// and how many gadget controllers are there. A drive plugged in through
+/// OTG gets neither power nor enumeration while the port is a gadget to a
+/// computer, and no page can show it then; this is the line that says so.
+pub fn port_state() -> String {
+    let mode = controllers().first().map(|(_, mode)| mode.clone()).unwrap_or_else(|| "unknown".to_owned());
+    let gadgets = fs::read_dir("/sys/class/udc").map_or(0, |listed| listed.flatten().count());
+    format!("usb: port {mode}, {gadgets} gadget controller(s)")
+}
+
+/// Each USB controller the phone has, with the mode it is in: `host` when
+/// an OTG device is on the port, `peripheral` while a computer holds it,
+/// `none` when it is in neither.
+fn controllers() -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let Ok(listed) = fs::read_dir("/sys/devices/platform/soc") else { return found };
+    for entry in listed.flatten() {
+        let dir = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".ssusb") {
+            continue;
+        }
+        let mode = match fs::read_to_string(dir.join("mode")) {
+            Ok(said) => said.trim().to_owned(),
+            Err(_) => "no mode".to_owned(),
+        };
+        found.push((name, mode));
+    }
+    found.sort();
+    found
+}
+
 /// Show `drive` read only at `at`: the first of its partitions, or its
 /// disk, that holds a filesystem the kernel reads. Gives the partition and
-/// the filesystem shown.
-pub fn mount(drive: &Drive, at: &Path) -> Result<(String, &'static str)> {
+/// the filesystem shown.pub fn mount(drive: &Drive, at: &Path) -> Result<(String, &'static str)> {
     fs::create_dir_all(at).with_context(|| format!("create {}", at.display()))?;
     let mut tried = Vec::new();
     for name in drive.candidates() {

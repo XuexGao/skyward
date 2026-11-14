@@ -593,7 +593,13 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     // there to ueventd, which looks in the recovery's firmware folders.
     std::fs::write(FIRMWARE_FALLBACK, "1").with_context(|| format!("write 1 to {FIRMWARE_FALLBACK}"))?;
     if let Some(firmware) = &cfg.firmware {
-        mount_firmware(&firmware.partition)?;
+        // A phone whose table names a partition this build cannot mount —
+        // because that phone's fstab names it otherwise — must still open
+        // its pages and its data partition: what the partition holds is
+        // the radios' firmware, not the keys.
+        if let Err(e) = mount_firmware(&firmware.partition) {
+            skyward_sys::kmsg(&format!("{} is not mounted: {e:#}", firmware.partition))?;
+        }
     }
     // An old WCNSS chip asks for its NV image the first time it powers up,
     // which happens as soon as its daemon starts below — before anyone can

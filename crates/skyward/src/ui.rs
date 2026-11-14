@@ -612,7 +612,7 @@ struct Plugged {
 /// in two looks running is shown, the kernel having listed its partitions by
 /// then. `seen` is a drive found by the look before that is not shown yet.
 /// What the pages are told comes back when it changed.
-fn look_for_drive(plugged: &mut Option<Plugged>, seen: &mut Option<String>) -> Result<Option<Option<UsbDrive>>> {
+fn look_for_drive(plugged: &mut Option<Plugged>, seen: &mut Option<String>, said: &mut Option<String>) -> Result<Option<Option<UsbDrive>>> {
     let found = usb::drives()?.into_iter().find(Drive::ready);
     if let Some(p) = plugged {
         if found.is_some_and(|d| d.disk == p.drive.disk) {
@@ -628,6 +628,15 @@ fn look_for_drive(plugged: &mut Option<Plugged>, seen: &mut Option<String>) -> R
     }
     let Some(drive) = found else {
         *seen = None;
+        // A drive plugged in through OTG gives nothing to look at while
+        // the port is a gadget to a computer: no power, no enumeration.
+        // What the controller says is all the phone can tell of it, and it
+        // goes to the log when it changes, not once a second.
+        let state = usb::port_state();
+        if said.as_deref() != Some(state.as_str()) {
+            skyward_sys::kmsg(&state)?;
+            *said = Some(state);
+        }
         return Ok(None);
     };
     if seen.as_deref() != Some(drive.disk.as_str()) {
@@ -1305,6 +1314,11 @@ struct Pages<'a> {
     plugged: Option<Plugged>,
     seen: Option<String>,
     drive_at: Instant,
+    /// What the port was last said to be in the kernel log while no drive
+    /// showed up, so that it is written when it changes rather than on
+    /// every look: a drive plugged in and never seen is then explained by
+    /// the line that was written as it was.
+    usb_said: Option<String>,
 }
 
 impl<'a> Pages<'a> {
@@ -1521,6 +1535,7 @@ impl<'a> Pages<'a> {
             plugged: None,
             seen: None,
             drive_at: Instant::now(),
+            usb_said: None,
         })
     }
 
@@ -1711,7 +1726,7 @@ impl<'a> Pages<'a> {
         }
         let mut drive_told = None;
         if self.drive_at.elapsed().as_secs() >= 1 {
-            drive_told = look_for_drive(&mut self.plugged, &mut self.seen)?;
+            drive_told = look_for_drive(&mut self.plugged, &mut self.seen, &mut self.usb_said)?;
             self.drive_at = Instant::now();
         }
         self.installer_told(now)?;
