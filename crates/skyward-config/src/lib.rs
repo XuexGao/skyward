@@ -141,6 +141,10 @@ pub struct Wlan {
     pub interface: String,
     /// The phone's own wpa_supplicant.
     pub supplicant: String,
+    /// The driver name wpa_supplicant is given with -D. Newer Qualcomm
+    /// parts speak nl80211; the old prima/wcnss ones speak WEXT.
+    #[serde(default = "default_wlan_driver")]
+    pub driver: String,
     /// Directories for its LD_LIBRARY_PATH, searched in order and before
     /// the libraries of the vendor interface the phone was built against.
     #[serde(default)]
@@ -518,6 +522,10 @@ fn default_module_sources() -> Vec<String> {
     vec!["vendor_boot".into(), "vendor_dlkm".into(), "vendor".into()]
 }
 
+fn default_wlan_driver() -> String {
+    "nl80211".into()
+}
+
 /// The phone a device configuration is for, read on its own: the
 /// configuration a newer build of Skyward carries may hold what this build
 /// does not read.
@@ -685,8 +693,15 @@ mod tests {
             assert_eq!(cfg.device.codename, codename);
             assert!(!cfg.device.ab, "the phone keeps one system, not two slots");
             let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
+            // The A57 keeps a copy of the directory in its own ramdisk so
+            // it can still open /data after the system partition is wiped;
+            // the R9s reads its installed system's copy instead.
+            let directory = match codename {
+                "a57" => "/system/bin/hwservicemanager",
+                _ => "/mnt/system/bin/hwservicemanager",
+            };
             for want in [
-                "/mnt/system/bin/hwservicemanager",
+                directory,
                 "/vendor/bin/vndservicemanager",
                 "/vendor/bin/qseecomd",
                 "/vendor/bin/hw/android.hardware.keymaster@3.0-service",
@@ -701,7 +716,7 @@ mod tests {
             // The directory the hardware services register with has to be
             // running before any of them does, and the daemon they reach
             // the secure world through before the two that hold the keys.
-            assert!(order("/mnt/system/bin/hwservicemanager") < order("/vendor/bin/qseecomd"));
+            assert!(order(directory) < order("/vendor/bin/qseecomd"));
             assert!(order("/vendor/bin/qseecomd") < order("/vendor/bin/hw/android.hardware.keymaster@3.0-service"));
             for s in cfg.services.iter().filter(|s| s.path.contains("@3.0-service") || s.path.contains("@1.0-service")) {
                 assert!(s.ready_hardware_service.is_some(), "{} is waited for", s.path);
