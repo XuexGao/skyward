@@ -576,7 +576,18 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         let described = secure::publish_descriptions(&registering, &files)?;
         skyward_sys::kmsg(&format!("{described} of the phone's own service descriptions published"))?;
     }
-    let libraries = secure::libraries()?;
+    // A phone whose VNDK bundle cannot be opened (an apex payload the
+    // kernel will not mount, for instance) still needs its key services:
+    // the recovery keeps the libraries those ask for in its own ramdisk.
+    // What the bundle would have added is optional, so a failure here must
+    // not keep every service below from ever starting.
+    let libraries = match secure::libraries() {
+        Ok(dir) => dir,
+        Err(e) => {
+            skyward_sys::kmsg(&format!("no vendor library bundle: {e:#}"))?;
+            None
+        }
+    };
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }
