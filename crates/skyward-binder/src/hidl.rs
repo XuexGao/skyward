@@ -568,8 +568,8 @@ mod tests {
         m.u32(1);
         m.bytes(&[9; 4]);
         assert_eq!(m.addresses, vec![16, 56]);
-        for at in &m.addresses {
-            assert_eq!(at % ALIGN, 0, "an address at {at} is not on a boundary of four");
+        for &at in &m.addresses {
+            assert_eq!(at % ALIGN as u64, 0, "an address at {at} is not on a boundary of four");
         }
     }
 
