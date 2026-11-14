@@ -26,7 +26,9 @@ const OBJECT: u32 = u32::from_be_bytes([b's', b'h', b'*', 0x85]);
 const INSIDE_ANOTHER: u32 = 1;
 
 /// The other place that flag is put: the one a phone whose kernel and whose
-/// system were not built from one tree answers to.
+/// system were not built from one tree answers to. Only a look-up on the
+/// phone asks with it, so a build for the computer has no one to use it.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const INSIDE_ANOTHER_ELSEWHERE: u32 = 2;
 
 /// How much room an address takes among the values.
