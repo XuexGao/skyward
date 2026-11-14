@@ -2,7 +2,7 @@
 //! own, so the screen keeps up: the keys come from the secure world, and
 //! what a user enters at their screen lock is checked slowly on purpose.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use skyward_binder::driver::Binder;
 use skyward_crypto::data::{self, Closed, Opening};
 use skyward_crypto::keymint::KeyMint;
