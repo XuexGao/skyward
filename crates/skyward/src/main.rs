@@ -539,6 +539,15 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     if let Some(firmware) = &cfg.firmware {
         mount_firmware(&firmware.partition)?;
     }
+    // An old WCNSS chip asks for its NV image the first time it powers up,
+    // which happens as soon as its daemon starts below — before anyone can
+    // turn the WLAN on. Place the WLAN's firmware now so that request is
+    // answered; the WLAN thread places them again harmlessly when it starts.
+    for wlan in &cfg.wlan {
+        for file in &wlan.firmware {
+            wlan::place(file)?;
+        }
+    }
     for name in &cfg.partitions.mounted {
         let at = skyward_block::fstab::mount(name)?;
         skyward_sys::kmsg(&format!("{name} is mounted on {}", at.display()))?;
