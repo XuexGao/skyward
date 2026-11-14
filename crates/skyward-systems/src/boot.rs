@@ -165,7 +165,7 @@ pub(crate) mod tests {
         assert!(starts_from_data(&ours));
         // A system's own archive is an LZ4 archive too, and Skyward's
         // comes after it.
-        let its_own = lz4_legacy(&Ramdisk { entries: Vec::new() }.archive().unwrap());
+        let its_own = lz4_legacy(&Ramdisk::empty().archive().unwrap());
         let (after_its_own, _) = with_start(&template(&its_own), b"program", &start()).unwrap();
         assert!(starts_from_data(&after_its_own));
         assert!(!starts_from_data(&template(&its_own)), "the installed system's own image");

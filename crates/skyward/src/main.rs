@@ -429,7 +429,13 @@ fn main() -> Result<()> {
             // The phone's key service is whichever kind it serves: the newer
             // one on a phone built from Android 11 on, the older one on the
             // OPPO R9s and A57, whose secure world speaks only that.
-            let opening = decrypt::with_key_service(|service| data::open_without_credential(service)).map_err(anyhow::Error::msg)?;
+            // Every step says what it found, so a phone whose data does not
+            // open says where it stopped: this is the read-out the device
+            // notes tell a person to paste back.
+            let opening = decrypt::with_key_service(|service| {
+                data::open_without_credential_saying(service, &mut |line| println!("  {line}"))
+            })
+            .map_err(anyhow::Error::msg)?;
             match &opening.mounted {
                 Some(mounted) => {
                     if let Some(checked) = &mounted.checked {
@@ -443,8 +449,10 @@ fn main() -> Result<()> {
             let mut closed = opening.closed;
             let asked = closed.iter().find(|c| !c.made_up).map(|c| c.user);
             if let (Some(credential), Some(user)) = (&credential, asked) {
-                let unlocked = decrypt::with_key_service(|service| data::unlock(service, &closed, user, credential.as_bytes()))
-                    .map_err(anyhow::Error::msg)?;
+                let unlocked = decrypt::with_key_service(|service| {
+                    data::unlock_saying(service, &closed, user, credential.as_bytes(), &mut |line| println!("  {line}"))
+                })
+                .map_err(anyhow::Error::msg)?;
                 closed = unlocked;
             }
             for c in &closed {
@@ -573,10 +581,10 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     // at once. Give every one of them what init would.
     for node in ["/dev/binder", "/dev/hwbinder", "/dev/vndbinder"] {
         let at = Path::new(node);
-        if at.exists() {
-            if let Err(e) = std::fs::set_permissions(at, std::os::unix::fs::PermissionsExt::from_mode(0o666)) {
-                skyward_sys::kmsg(&format!("{node} keeps the mode binderfs gave it: {e:#}"))?;
-            }
+        if at.exists()
+            && let Err(e) = std::fs::set_permissions(at, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+        {
+            skyward_sys::kmsg(&format!("{node} keeps the mode binderfs gave it: {e:#}"))?;
         }
     }
     let services: Vec<Started> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().map(Started::from).collect();

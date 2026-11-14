@@ -1,0 +1,139 @@
+name: Build A57 recovery (fast, reuse kernel)
+
+# A slimmer build for iterating on the recovery service (skyward) without
+# rebuilding the kernel or any other device.  The kernel is taken from a
+# release asset built once by the full build-oppo.yml, so a HIDL-only
+# change rebuilds only the ~4-minute tools job and repacks against the
+# cached kernel and the phone's own stock recovery.
+#
+# Use this for changes that touch crates/**, devices/a57.toml, or the
+# packer only.  When the kernel itself changes, run build-oppo.yml and
+# refresh the kernel-a57-v1 release asset.
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: The one device to build for (a57 only here)
+        required: false
+        default: a57
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  KERNEL_RELEASE_TAG: kernel-a57-v1
+
+jobs:
+  tools:
+    name: Build the recovery service and the packer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Build the recovery service for the phone
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+      # It runs as a second system's first program, before any library is
+      # there to load.
+      - name: Build the second system's first program, static
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward-system-init --target-dir target/system-init
+      - name: Build the packer
+        run: cargo build --locked --release -p skyward-pack
+      - name: Gather them
+        run: |
+          mkdir tools
+          cp target/aarch64-linux-android/release/skyward target/release/skyward-pack tools/
+          cp target/system-init/aarch64-linux-android/release/system-init tools/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tools
+          path: tools/
+          if-no-files-found: error
+          retention-days: 1
+
+  recovery:
+    name: Recovery for ${{ inputs.device }}
+    needs: [tools]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: tools
+          path: tools
+      - name: Make the tools runnable
+        run: chmod +x tools/skyward tools/skyward-pack
+      - name: Fetch the prebuilt kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The kernel travels between runs as an artifact of the last
+          # successful full build; only the recovery itself is rebuilt here.
+          run_id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow build-oppo.yml --status success --limit 1 \
+            --json databaseId -q '.[0].databaseId')
+          gh run download "$run_id" -R "$GITHUB_REPOSITORY" -n "kernel-${{ inputs.device }}"
+          test -f "Image.gz-dtb-${{ inputs.device }}"
+      - name: Read the stock build the recovery is made on
+        id: stock
+        run: tools/skyward-pack stock --config "devices/${{ inputs.device }}.toml" >> "$GITHUB_OUTPUT"
+      - name: Restore the stock recovery
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: stock/recovery.img
+          key: stock-recovery-${{ inputs.device }}-${{ steps.stock.outputs.recovery }}
+      - name: Take the stock recovery from where it is handed out
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: tools/skyward-pack stock --config "devices/${{ inputs.device }}.toml" --out stock/recovery.img
+      - name: Check the stock recovery
+        env:
+          RECOVERY: ${{ steps.stock.outputs.recovery }}
+        run: echo "$RECOVERY  stock/recovery.img" | sha256sum --check
+      - name: Pack the recovery
+        id: pack
+        env:
+          DEVICE: ${{ inputs.device }}
+          STOCK: ${{ steps.stock.outputs.version }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_SHA::7}"
+          name="skyward-$version-$DEVICE-$STOCK"
+          mkdir out
+          tools/skyward-pack recovery --stock stock/recovery.img --kernel "Image.gz-dtb-$DEVICE" \
+            --binary tools/skyward --system-init tools/system-init --config "devices/$DEVICE.toml" \
+            --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
+            --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      # What the image has to have for the phone's data partition to open at
+      # all: the device configuration inside it must be the one this build
+      # made, with the programs that reach the phone's secure world in it.
+      - name: Check the image carries the device it was built for
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+          DEVICE: ${{ inputs.device }}
+        run: |
+          set -euo pipefail
+          img="out/$NAME.img"
+          tools/skyward-pack list "$img" > listing.txt
+          grep -q " skyward/device.toml$" listing.txt
+          tools/skyward-pack cat "$img" skyward/device.toml > device.toml
+          cmp device.toml "devices/$DEVICE.toml"
+          grep -q 'keymaster@3.0-service' device.toml
+          grep -q 'gatekeeper@1.0-service' device.toml
+          grep -q 'qseecomd' device.toml
+          echo "$DEVICE: the image carries its device, with the programs that reach the secure world"
+      - name: Zip the image
+        working-directory: out
+        env:
+          NAME: ${{ steps.pack.outputs.name }}
+        run: zip -9 "$NAME.zip" "$NAME.img"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: out/${{ steps.pack.outputs.name }}.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 14

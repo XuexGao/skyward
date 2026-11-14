@@ -600,18 +600,18 @@ fn unix_ms_now() -> Result<i64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH).context("the clock is before 1970")?.as_millis() as i64)
 }
 
-/// The USB drive plugged in, and whether it is shown at [`USB_DRIVE`] or
-/// why it could not be.
+/// The drive plugged in or the card put in, and whether it is shown at
+/// [`USB_DRIVE`] or why it could not be.
 struct Plugged {
     drive: Drive,
     shown: Result<(), String>,
 }
 
-/// Look for the USB drive plugged in: one gone is taken away from where it
-/// was shown, even with files on it still open, and one found in two looks
-/// running is shown, the kernel having listed its partitions by then.
-/// `seen` is a drive found by the look before that is not shown yet. What
-/// the pages are told comes back when it changed.
+/// Look for the drive plugged in or the card put in: one gone is taken away
+/// from where it was shown, even with files on it still open, and one found
+/// in two looks running is shown, the kernel having listed its partitions by
+/// then. `seen` is a drive found by the look before that is not shown yet.
+/// What the pages are told comes back when it changed.
 fn look_for_drive(plugged: &mut Option<Plugged>, seen: &mut Option<String>) -> Result<Option<Option<UsbDrive>>> {
     let found = usb::drives()?.into_iter().find(Drive::ready);
     if let Some(p) = plugged {
@@ -621,7 +621,7 @@ fn look_for_drive(plugged: &mut Option<Plugged>, seen: &mut Option<String>) -> R
         if p.shown.is_ok() {
             skyward_block::mount::umount_detach(Path::new(USB_DRIVE))?;
         }
-        skyward_sys::kmsg(&format!("USB drive {} is gone", p.drive.disk))?;
+        skyward_sys::kmsg(&format!("storage {} is gone", p.drive.disk))?;
         *plugged = None;
         *seen = None;
         return Ok(Some(None));
@@ -636,11 +636,11 @@ fn look_for_drive(plugged: &mut Option<Plugged>, seen: &mut Option<String>) -> R
     }
     let shown = match usb::mount(&drive, Path::new(USB_DRIVE)) {
         Ok((part, filesystem)) => {
-            skyward_sys::kmsg(&format!("USB drive {part} shown at {USB_DRIVE} as {filesystem}"))?;
+            skyward_sys::kmsg(&format!("storage {part} shown at {USB_DRIVE} as {filesystem}"))?;
             Ok(())
         }
         Err(e) => {
-            skyward_sys::kmsg(&format!("USB drive {} not shown: {e:#}", drive.disk))?;
+            skyward_sys::kmsg(&format!("storage {} not shown: {e:#}", drive.disk))?;
             Err(format!("{e:#}"))
         }
     };

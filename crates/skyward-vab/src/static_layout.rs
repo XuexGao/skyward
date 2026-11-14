@@ -149,10 +149,10 @@ pub fn mount_base(base: &str) -> Result<Mounted> {
 pub fn unmount_base(base: &str) -> Result<()> {
     let entry = entry(base)?;
     let at = entry.recovery_mount_point();
-    if let Some(shown) = mount::visible(&at)? {
-        if shown.device == skyward_block::devnum(entry.device())? {
-            mount::umount(&at).with_context(|| format!("unmount {}", at.display()))?;
-        }
+    if let Some(shown) = mount::visible(&at)?
+        && shown.device == skyward_block::devnum(entry.device())?
+    {
+        mount::umount(&at).with_context(|| format!("unmount {}", at.display()))?;
     }
     Ok(())
 }

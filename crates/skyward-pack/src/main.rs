@@ -261,8 +261,14 @@ fn main() -> Result<()> {
         }
         Cmd::Described { config, partitions, out } => {
             let stock = skyward_config::DeviceConfig::load(&config)?.stock.with_context(|| format!("{} names no stock build", config.display()))?;
+            // The files are taken out of a full update package; a phone whose
+            // maker hands out only an image has none to take them from.
+            let package = stock
+                .package
+                .as_deref()
+                .with_context(|| format!("{} names no update package, only an image", config.display()))?;
             let partitions = if partitions.is_empty() { skyward_programs::phone::PARTITIONS.map(str::to_string).to_vec() } else { partitions };
-            described::take(&stock.package, &partitions, &out)
+            described::take(package, &partitions, &out)
         }
     }
 }

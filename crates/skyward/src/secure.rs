@@ -127,11 +127,10 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
         (Path::new(HARDWARE_DRIVER), Some(Path::new(HARDWARE_DRIVER_NODE))),
         (Path::new("/dev/vndbinder"), None),
     ] {
-        if let Some(node) = node {
-            if !driver.exists() {
-                std::os::unix::fs::symlink(node, driver)
-                    .with_context(|| format!("point {} at {}", driver.display(), node.display()))?;
-            }
+        if let Some(node) = node
+            && !driver.exists()
+        {
+            std::os::unix::fs::symlink(node, driver).with_context(|| format!("point {} at {}", driver.display(), node.display()))?;
         }
         fs::set_permissions(driver, std::os::unix::fs::PermissionsExt::from_mode(0o666))
             .with_context(|| format!("open {} to every program", driver.display()))?;
