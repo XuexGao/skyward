@@ -22,13 +22,7 @@ const SLEEP_DISABLED: &str = "/sys/devices/system/cpu/qcom_lpm/parameters/sleep_
 /// down where Qualcomm's idle driver keeps them up: what was done, for the
 /// log.
 pub fn run_as_system() -> Result<Vec<String>> {
-    let mut policies: Vec<_> = fs::read_dir(CPUFREQ)
-        .with_context(|| format!("list {CPUFREQ}"))?
-        .map(|e| e.map(|e| e.path()))
-        .collect::<std::io::Result<_>>()
-        .with_context(|| format!("list {CPUFREQ}"))?;
-    policies.retain(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("policy")));
-    policies.sort();
+    let policies = policies()?;
     let mut done = Vec::new();
     for policy in &policies {
         let name = policy.file_name().expect("a policy has a name").to_string_lossy().into_owned();
@@ -51,6 +45,84 @@ pub fn run_as_system() -> Result<Vec<String>> {
 /// The governor to run a cluster with, of the ones `available` lists.
 fn governor(available: &str) -> Option<&'static str> {
     GOVERNORS.into_iter().find(|g| available.split_whitespace().any(|a| a == *g))
+}
+
+/// Where each cluster's frequency policy is, by name.
+fn policies() -> Result<Vec<std::path::PathBuf>> {
+    let mut policies: Vec<_> = fs::read_dir(CPUFREQ)
+        .with_context(|| format!("list {CPUFREQ}"))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()
+        .with_context(|| format!("list {CPUFREQ}"))?;
+    policies.retain(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("policy")));
+    policies.sort();
+    Ok(policies)
+}
+
+/// Held while the pages move, so that the frame being drawn is over before
+/// the governor that follows the load has answered it: the time it takes to
+/// follow is what a person feels as a page that lags behind their finger.
+///
+/// Holding costs a write per cluster when the pages start moving and
+/// another when they stop, and nothing in between; a pass that changes
+/// nothing writes nothing. What fails to be written is not reported: a
+/// cluster that will not be held runs as it would have anyway, and a page
+/// that draws more slowly is not worth saying anything about.
+#[derive(Default)]
+pub struct Boost {
+    /// Each cluster whose floor was raised, with the floor it had.
+    raised: Option<Vec<(std::path::PathBuf, String)>>,
+}
+
+impl Boost {
+    pub fn open() -> Boost {
+        Boost::default()
+    }
+
+    /// Hold every cluster at the top frequency it may reach.
+    pub fn hold(&mut self) {
+        if self.raised.is_some() {
+            return;
+        }
+        let mut raised = Vec::new();
+        for policy in policies().unwrap_or_default() {
+            let Ok(floor) = fs::read_to_string(policy.join("scaling_min_freq")) else {
+                continue;
+            };
+            let Some(top) = top_of(&policy) else {
+                continue;
+            };
+            if floor.trim() == top {
+                continue;
+            }
+            if fs::write(policy.join("scaling_min_freq"), top.as_bytes()).is_ok() {
+                raised.push((policy, floor.trim().to_owned()));
+            }
+        }
+        self.raised = Some(raised);
+    }
+
+    /// Let each cluster follow its load again, at the floor it had before.
+    pub fn release(&mut self) {
+        for (policy, floor) in self.raised.take().unwrap_or_default() {
+            let _ = fs::write(policy.join("scaling_min_freq"), floor);
+        }
+    }
+}
+
+impl Drop for Boost {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// The top frequency a cluster may be set to, as the kernel writes it.
+fn top_of(policy: &Path) -> Option<String> {
+    ["scaling_max_freq", "cpuinfo_max_freq"].into_iter().find_map(|name| {
+        let top = fs::read_to_string(policy.join(name)).ok()?;
+        let top = top.trim();
+        (!top.is_empty()).then_some(top.to_owned())
+    })
 }
 
 #[cfg(test)]

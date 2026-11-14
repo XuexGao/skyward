@@ -45,10 +45,12 @@ impl Decryptor {
             .name("decrypt".into())
             .spawn(move || {
                 let ended_as = match job {
-                    Job::Open => Ended::Opened(with_key_service(data::open_without_credential)),
-                    Job::Unlock { closed, user, credential } => {
-                        Ended::Unlocked(with_key_service(|service| data::unlock(service, &closed, user, &credential)))
-                    }
+                    Job::Open => Ended::Opened(with_key_service(|service| {
+                        data::open_without_credential_saying(service, &mut |line| said(line))
+                    })),
+                    Job::Unlock { closed, user, credential } => Ended::Unlocked(with_key_service(|service| {
+                        data::unlock_saying(service, &closed, user, &credential, &mut |line| said(line))
+                    })),
                 };
                 // The screen only stops listening once it has let the
                 // thread go.
@@ -78,6 +80,12 @@ impl Drop for Decryptor {
             thread.join().expect("the decrypting thread does not panic");
         }
     }
+}
+
+/// Each thing opening the partition does, as a line for the kernel log, so
+/// a phone whose data does not open says there where it stopped.
+pub fn said(line: &str) {
+    let _ = skyward_sys::kmsg(&format!("decrypt: {line}"));
 }
 
 /// Do `work` with the phone's key service, reached afresh for it, and say
@@ -199,13 +207,25 @@ pub fn report(credential: Option<&str>, user: u32, clean: bool) -> Result<()> {
     }
     let mode = std::fs::read_to_string("/data/unencrypted/mode");
     say("the mode of the shared key", mode.as_ref().map(|m| m.trim().to_string()).map_err(|e| anyhow::anyhow!("{e}")));
+    // The key the whole partition is opened with lives on the metadata
+    // partition, which nothing mounts unless the phone's own table says so.
+    say(
+        "whether /metadata is mounted",
+        skyward_block::mount::is_mount_point(std::path::Path::new("/metadata")).map(|mounted| mounted.to_string()),
+    );
     for (what, path) in [
+        ("the key of the whole partition", "/metadata/vold/metadata_encryption/key"),
         ("the shared key", "/data/unencrypted/key"),
         ("the shared key's name", "/data/unencrypted/ref"),
         ("the key store", skyward_crypto::keystore2::DATABASE),
         ("the lock settings", skyward_crypto::locksettings::DATABASE),
     ] {
         say(what, std::fs::metadata(path).map(|m| format!("{} bytes", m.len())).map_err(|e| anyhow::anyhow!("{path}: {e}")));
+    }
+    for dir in ["/data/system_de/0/spblob", "/data/misc/keystore/user_0"] {
+        let names: std::io::Result<Vec<String>> =
+            std::fs::read_dir(dir).map(|entries| entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect());
+        say(dir, names.map(|n| format!("{} entries, {n:?}", n.len())).map_err(|e| anyhow::anyhow!("{e}")));
     }
     let mut users = Vec::new();
     for dir in ["/data/misc/vold/user_keys/de", "/data/misc/vold/user_keys/ce"] {
@@ -224,7 +244,10 @@ pub fn report(credential: Option<&str>, user: u32, clean: bool) -> Result<()> {
         println!("then: no user's keys are on the partition; there is nothing to open");
         return Ok(());
     }
-    let opened = with_key_service(|service| skyward_crypto::data::open_without_credential(service));
+    println!("then: opening it, step by step:");
+    let opened = with_key_service(|service| {
+        skyward_crypto::data::open_without_credential_saying(service, &mut |line| println!("  {line}"))
+    });
     match &opened {
         Ok(o) => {
             println!(
@@ -233,13 +256,15 @@ pub fn report(credential: Option<&str>, user: u32, clean: bool) -> Result<()> {
                 o.closed
             );
         }
-        Err(e) => println!("then: /data did not open: {e}"),
+        Err(e) => println!("then: /data did not open: {e:#}"),
     }
     if let Some(credential) = credential {
         match &opened {
-            Ok(o) => match with_key_service(|service| skyward_crypto::data::unlock(service, &o.closed, user, credential.as_bytes())) {
+            Ok(o) => match with_key_service(|service| {
+                skyward_crypto::data::unlock_saying(service, &o.closed, user, credential.as_bytes(), &mut |line| println!("  {line}"))
+            }) {
                 Ok(still) => println!("then: after the credential of user {user}, still closed {still:?}"),
-                Err(e) => println!("then: the credential of user {user} did not open their files: {e}"),
+                Err(e) => println!("then: the credential of user {user} did not open their files: {e:#}"),
             },
             Err(_) => println!("then: the credential was not tried, the partition did not open"),
         }

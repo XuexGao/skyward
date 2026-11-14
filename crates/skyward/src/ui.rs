@@ -24,6 +24,7 @@ use skyward_install::asked::{self, Needs};
 use skyward_install::{Detach, Installer, Options};
 use skyward_sys::bcb::{self, Work, REFORMATS};
 use skyward_sys::control::{Control, Request};
+use skyward_sys::cpu::Boost;
 use skyward_sys::Power;
 use skyward_files::Ownership;
 use skyward_block::usb::{self, Drive};
@@ -67,6 +68,73 @@ const TOUCH_WAIT: Duration = Duration::from_secs(5);
 /// the display turns off; the phone's own system keeps its panel dozing
 /// about as long after the screen goes off.
 const REST: Duration = Duration::from_secs(5);
+
+/// How often how far a computer has the USB port is read again: what it
+/// says changes no faster than a cable goes in.
+const USB_RECHECK: Duration = Duration::from_secs(1);
+
+/// How long one of the panel's sixty frames a second may take before it is
+/// late, and how often what the frames took is written to the kernel log.
+const LATE_FRAME: Duration = Duration::from_millis(17);
+const FRAMES_LOGGED_EVERY: Duration = Duration::from_secs(2);
+
+/// How long a frame is given on a panel that takes one as fast as it is
+/// brought: the panel's own sixty a second, which is all a person sees, and
+/// every frame past it is a whole screen copied for nothing.
+const FRAME: Duration = Duration::from_millis(16);
+
+/// What the frames the panel showed were timed at: how much of each went
+/// into drawing the pages and how much into putting them on the panel, how
+/// long the worst took, and how many came late. Told to the kernel log now
+/// and then, which is where a phone whose pages feel slow says what a
+/// frame costs and where the time goes.
+struct Frames {
+    since: Instant,
+    count: u64,
+    drawing: Duration,
+    showing: Duration,
+    worst: Duration,
+    late: u64,
+}
+
+impl Frames {
+    fn new() -> Frames {
+        Frames { since: Instant::now(), count: 0, drawing: Duration::ZERO, showing: Duration::ZERO, worst: Duration::ZERO, late: 0 }
+    }
+
+    fn note(&mut self, drawing: Duration, showing: Duration) {
+        self.count += 1;
+        self.drawing += drawing;
+        self.showing += showing;
+        let took = drawing + showing;
+        self.worst = self.worst.max(took);
+        if took > LATE_FRAME {
+            self.late += 1;
+        }
+    }
+
+    /// A line for the kernel log once enough time has passed for one, and
+    /// the frames counted again from none.
+    fn logged(&mut self) -> Option<String> {
+        let since = self.since.elapsed();
+        if self.count == 0 || since < FRAMES_LOGGED_EVERY {
+            return None;
+        }
+        let n = self.count;
+        let line = format!(
+            "{} frames in {} ms: {} ms drawing each on average, {} ms showing, {} ms at worst, {} over {} ms",
+            n,
+            since.as_millis(),
+            (self.drawing.as_millis() as u64).div_ceil(n),
+            (self.showing.as_millis() as u64).div_ceil(n),
+            self.worst.as_millis(),
+            self.late,
+            LATE_FRAME.as_millis()
+        );
+        *self = Frames::new();
+        Some(line)
+    }
+}
 
 /// Where logs saved to the temporary folder go, in the recovery service's
 /// own folder, and where in internal storage the others do.
@@ -1122,10 +1190,26 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
     let mounts = || read_mounts(&cfg.services).map_err(|e| format!("{e:#}"));
 
     let mut screen = Canvas::new(w, h);
+    // What the frames shown are timed at, for the kernel log.
+    let mut frames = Frames::new();
     // A page sliding over another draws on three screens' worth of canvas
     // besides the panel's: made ready now, the first slide finds them so.
     Canvas::keep_ready(w, h, 3);
     let mut shown_clock = String::new();
+    // The second the clock in the status bar was last set from, and whether
+    // the panel was lit the pass before, so that neither the letters nor the
+    // panel's own refresh command is paid for on every pass.
+    let mut shown_second = i64::MIN;
+    let mut lit = false;
+    // How far a computer has the USB port, read once a second rather than
+    // on every pass.
+    let mut link = usb_link().unwrap_or(UsbLink::Unplugged);
+    let mut link_at = Instant::now();
+    // When the frame on the panel now was handed over, for the pace the
+    // loop keeps on a panel that has none of its own.
+    let mut shown_at: Option<Instant> = None;
+    // Held while the pages move on a lit screen.
+    let mut boost = Boost::open();
     // The readings are taken again on a thread of their own; those taken
     // here as work ends say how it left the phone, and readings started
     // before them are out of date.
@@ -1413,11 +1497,6 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
                 other => unreachable!("time passing asks for nothing but the motor, not {other:?}"),
             }
         }
-        let time = clock(app.state.time_zone)?;
-        if time != shown_clock {
-            shown_clock = time;
-            app.redraw();
-        }
         for reading in readings.taken() {
             match reading {
                 Reading::Battery(battery, at) => {
@@ -1450,6 +1529,18 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             app.set_fastboot(running, link);
             port_at = Instant::now();
         }
+        // The time of day is read every pass and written out once a second:
+        // setting it in the status bar's letters is what the pass pays for,
+        // and nothing in it changes in between.
+        let second = unix_now()?;
+        if second != shown_second {
+            shown_second = second;
+            let time = clock(app.state.time_zone)?;
+            if time != shown_clock {
+                shown_clock = time;
+                app.redraw();
+            }
+        }
         let panel = app.panel(now);
         let mut shown = false;
         if panel.is_some() {
@@ -1457,8 +1548,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             if app.take_dirty() || !surface.is_on() {
                 let t0 = Instant::now();
                 app.compose(&mut screen, &fonts, &info, &shown_clock, now);
+                let drawn = t0.elapsed();
                 surface.present(&screen)?;
-                eprintln!("frame {:?} in {} ms", app.screen(), t0.elapsed().as_millis());
+                frames.note(drawn, t0.elapsed().saturating_sub(drawn));
+                shown_at = Some(Instant::now());
                 if let Some(path) = dump {
                     fs::write(path, &screen.data).with_context(|| format!("write {}", path.display()))?;
                 }
@@ -1487,8 +1580,10 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
         }
         if panel.is_some() {
             // Lit, a panel that came on again switches to its fastest
-            // refresh.
-            surface.speed_up()?;
+            // refresh; one that was lit already is left as it is.
+            if !lit {
+                surface.speed_up()?;
+            }
             rested_at = None;
         } else if surface.is_on() {
             // With the backlight off, the panel rests, and the touch
@@ -1501,17 +1596,41 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             surface.turn_off()?;
             rested_at = None;
         }
+        lit = panel.is_some();
         // A page at rest draws the rows it has yet to while nothing else
         // is to be done, a band at a time, looking for input between bands.
         let ahead = panel.is_some() && !shown && app.draw_ahead(&fonts, &info);
+        // What the frames of the last stretch took goes to the kernel log,
+        // so a phone whose pages feel slow says what a frame costs.
+        if let Some(line) = frames.logged() {
+            skyward_sys::kmsg(&line)?;
+        }
+        let due = app.deadline(now);
+        // While the pages move on a lit screen the CPUs are held at their
+        // fastest: a frame's work is over before a governor that follows the
+        // load has answered it, and that lateness is what a person feels.
+        if panel.is_some() && due == Some(0) {
+            boost.hold();
+        } else {
+            boost.release();
+        }
         // A frame shown has waited for the one before it to reach the
         // panel, which keeps the loop to the panel's pace; otherwise the CPU
         // gets at least a millisecond.
         let floor = if shown { 0 } else { 1 };
-        let until_due = app.deadline(now).map(|d| d.saturating_sub(now) as i32);
+        let until_due = due.map(|d| d.saturating_sub(now) as i32);
         // A resting panel turns off once its rest is over.
         let rest_left = rested_at.map(|at| REST.saturating_sub(at.elapsed()).as_millis() as i32);
         let timeout = if ahead { 0 } else { until_due.into_iter().chain(rest_left).min().map_or(1000, |t| t.clamp(floor, 1000)) };
+        // A panel that takes a frame as fast as one is brought is held to
+        // sixty a second here. The pages moving are the only time the loop
+        // would otherwise come round again at once, and every pass past the
+        // panel's own rate is a whole screen copied for a frame no one sees.
+        let timeout = if !surface.paced() && due == Some(0) && !ahead {
+            timeout.max(shown_at.map_or(0, |at| FRAME.saturating_sub(at.elapsed()).as_millis() as i32))
+        } else {
+            timeout
+        };
         // With the display off, the phone sleeps unless something needs it
         // awake: work under way, fastboot or sideload, a restart on its way,
         // a command running in the terminal, a network being joined, the
@@ -1536,6 +1655,14 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             Some(sh) => !sh.waiting()?,
             None => false,
         };
+        // How far a computer has the port was read a moment ago: reading it
+        // each pass is a trip into the kernel that a lit screen makes
+        // hundreds of times a second, and what it says changes no faster
+        // than a cable goes in.
+        if link_at.elapsed() >= USB_RECHECK {
+            link_at = Instant::now();
+            link = usb_link().unwrap_or(link);
+        }
         let may_sleep = surface.is_off()
             && !busy
             && !fastboot
@@ -1544,7 +1671,7 @@ pub fn run(cfg: &DeviceConfig, font: &Path, mono: &Path, request: bcb::Request, 
             && !joining
             && !running
             && asked.is_none()
-            && usb_link()? != UsbLink::Connected;
+            && link != UsbLink::Connected;
         sleeper.allow(may_sleep);
         let mut fds = vec![inputs.fd(), uevents.fd(), sleeper.fd()];
         if let Some(i) = &installer {

@@ -405,9 +405,10 @@ fn main() -> Result<()> {
         #[cfg(target_os = "android")]
         Cmd::Data { credential, close: false } => {
             use skyward_crypto::data;
-            let binder = skyward_binder::driver::Binder::open()?;
-            let service = skyward_crypto::keymint::KeyMint::open(&binder)?;
-            let opening = data::open_without_credential(&service)?;
+            // The phone's key service is whichever kind it serves: the newer
+            // one on a phone built from Android 11 on, the older one on the
+            // OPPO R9s and A57, whose secure world speaks only that.
+            let opening = decrypt::with_key_service(|service| data::open_without_credential(service)).map_err(anyhow::Error::msg)?;
             match &opening.mounted {
                 Some(mounted) => {
                     if let Some(checked) = &mounted.checked {
@@ -421,7 +422,9 @@ fn main() -> Result<()> {
             let mut closed = opening.closed;
             let asked = closed.iter().find(|c| !c.made_up).map(|c| c.user);
             if let (Some(credential), Some(user)) = (&credential, asked) {
-                closed = data::unlock(&service, &closed, user, credential.as_bytes())?;
+                let unlocked = decrypt::with_key_service(|service| data::unlock(service, &closed, user, credential.as_bytes()))
+                    .map_err(anyhow::Error::msg)?;
+                closed = unlocked;
             }
             for c in &closed {
                 match &c.why {

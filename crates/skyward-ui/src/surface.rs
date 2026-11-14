@@ -27,6 +27,15 @@ pub trait Surface {
     fn is_off(&self) -> bool {
         !self.is_on()
     }
+    /// Whether [`Surface::present`] already waits for the panel, so the loop
+    /// that draws the frames need not keep their pace itself. A panel with a
+    /// flip to wait for has its own pace; a frame buffer written straight
+    /// into memory has none, and the loop would put out a frame each time it
+    /// came round, hundreds a second, the copies crowding out the work that
+    /// answers a touch.
+    fn paced(&self) -> bool {
+        true
+    }
     /// Switch a panel that came on again to its fastest refresh, where it
     /// has more than one.
     fn speed_up(&mut self) -> Result<()> {
@@ -1297,6 +1306,13 @@ pub mod fb {
 
         fn describe(&self) -> String {
             self.summary.clone()
+        }
+
+        /// Frames written into memory are the panel's at once, or as soon as
+        /// the driver flips to the half they went into: nothing here waits
+        /// for the panel, so the loop keeps their pace.
+        fn paced(&self) -> bool {
+            false
         }
 
         fn is_on(&self) -> bool {

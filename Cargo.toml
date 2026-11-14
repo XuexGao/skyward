@@ -47,3 +47,18 @@ strip = true
 # The UI draws every pixel of every frame; it is built for speed.
 [profile.release.package.skyward-ui]
 opt-level = 3
+
+# The rest is built for size, the recovery's ramdisk being small, save for
+# the crates whose work a person waits on: the hash a lock screen's password
+# goes through, the checks of a file system, the inflated packages, the
+# writes into the phone's own storage, and the drawing itself.
+[profile.release.package.skyward-crypto]
+opt-level = 3
+[profile.release.package.skyward-block]
+opt-level = 3
+[profile.release.package.skyward-fs]
+opt-level = 3
+[profile.release.package.skyward-vab]
+opt-level = 3
+[profile.release.package.skyward-net]
+opt-level = 3
