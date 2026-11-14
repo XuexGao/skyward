@@ -154,6 +154,13 @@ fn main() -> Result<()> {
                 rd.add(paths::TASK_PROFILES, 0o644, TASK_PROFILES.to_vec())?;
             }
             rd.add(paths::MTP_RC, 0o644, MTP_RC.to_vec())?;
+            // A recovery built on the stock image lacks the loader the phone's
+            // hardware services expect, so point it at the recovery's own
+            // loader; otherwise hwservicemanager, keymaster and gatekeeper
+            // fail to start because their ELF interpreter is missing.
+            if rd.find(paths::BOOTSTRAP_LINKER).is_none() {
+                rd.link(paths::BOOTSTRAP_LINKER, paths::LINKER64)?;
+            }
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier
