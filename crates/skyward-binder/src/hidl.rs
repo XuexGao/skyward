@@ -46,16 +46,13 @@ pub struct Message {
 impl Message {
     /// A call to `interface`, opened with the name the far side checks
     /// before it looks at anything the method itself takes.
-    ///
-    /// The name is written the way the older layout writes it: the bytes and
-    /// their terminator, and nothing after them. The far side reads exactly
-    /// that many bytes before it reads the method's own arguments, so any
-    /// padding written here would put every argument out by as many bytes as
-    /// were added, and the lengths they carry would come out as nonsense.
     pub fn call(interface: &str) -> Message {
         let mut m = Message::default();
         m.data.extend_from_slice(interface.as_bytes());
         m.data.push(0);
+        while !m.data.len().is_multiple_of(4) {
+            m.data.push(0);
+        }
         m
     }
 
@@ -63,13 +60,7 @@ impl Message {
         self.data.extend_from_slice(&v.to_le_bytes());
     }
 
-    /// A 64-bit number, which the phone's own writer puts on a boundary of
-    /// eight: it writes every number the same way, and a value wider than
-    /// a word is padded up to its own width first.
     pub fn u64(&mut self, v: u64) {
-        while !self.data.len().is_multiple_of(8) {
-            self.data.push(0);
-        }
         self.data.extend_from_slice(&v.to_le_bytes());
     }
 
@@ -128,10 +119,6 @@ impl Message {
     /// the one pointing inside it to name.
     fn address(&mut self, at: u64, length: usize, inside: Option<usize>) -> usize {
         let which = self.addresses.len();
-        // An address is one of the values, so it goes where a value goes.
-        while !self.data.len().is_multiple_of(WORD as usize) {
-            self.data.push(0);
-        }
         self.addresses.push(self.data.len() as u64);
         self.data.extend_from_slice(&ADDRESS.to_le_bytes());
         self.data.extend_from_slice(&inside.map_or(0, |_| INSIDE_ANOTHER).to_le_bytes());
