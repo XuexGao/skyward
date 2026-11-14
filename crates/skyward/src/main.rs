@@ -534,6 +534,19 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
             skyward_sys::kmsg(&format!("{node} is {}", inside.display()))?;
         }
     }
+    // init gives these nodes their mode as ueventd reads its rules, and a
+    // recovery runs none of them: binderfs makes the vendor directory's
+    // node with a mode only root may open, so the daemon the vendor
+    // services register with, which runs as its own user, starts and stops
+    // at once. Give every one of them what init would.
+    for node in ["/dev/binder", "/dev/hwbinder", "/dev/vndbinder"] {
+        let at = Path::new(node);
+        if at.exists() {
+            if let Err(e) = std::fs::set_permissions(at, std::os::unix::fs::PermissionsExt::from_mode(0o666)) {
+                skyward_sys::kmsg(&format!("{node} keeps the mode binderfs gave it: {e:#}"))?;
+            }
+        }
+    }
     let services: Vec<_> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().collect();
     // The drivers ask for their firmware by name, and the kernel looks only
     // in folders of its own unless told to pass on what it does not find
@@ -541,6 +554,15 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     std::fs::write(FIRMWARE_FALLBACK, "1").with_context(|| format!("write 1 to {FIRMWARE_FALLBACK}"))?;
     if let Some(firmware) = &cfg.firmware {
         mount_firmware(&firmware.partition)?;
+    }
+    // An old WCNSS chip asks for its NV image the first time it powers up,
+    // which happens as soon as its daemon starts below — before anyone can
+    // turn the WLAN on. Place the WLAN's firmware now so that request is
+    // answered; the WLAN thread places them again harmlessly when it starts.
+    if let Some(wlan) = &cfg.wlan {
+        for file in &wlan.firmware {
+            wlan::place(file)?;
+        }
     }
     for name in &cfg.partitions.mounted {
         let at = skyward_block::fstab::mount(name)?;
@@ -570,7 +592,18 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
         let described = secure::publish_descriptions(&registering, &files)?;
         skyward_sys::kmsg(&format!("{described} of the phone's own service descriptions published"))?;
     }
-    let libraries = secure::libraries()?;
+    // A phone whose VNDK bundle cannot be opened (an apex payload the
+    // kernel will not mount, for instance) still needs its key services:
+    // the recovery keeps the libraries those ask for in its own ramdisk.
+    // What the bundle would have added is optional, so a failure here must
+    // not keep every service below from ever starting.
+    let libraries = match secure::libraries() {
+        Ok(dir) => dir,
+        Err(e) => {
+            skyward_sys::kmsg(&format!("no vendor library bundle: {e:#}"))?;
+            None
+        }
+    };
     if let Some(dir) = &libraries {
         skyward_sys::kmsg(&format!("the phone's own libraries are at {}", dir.display()))?;
     }

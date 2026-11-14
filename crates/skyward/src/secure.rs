@@ -87,34 +87,54 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     // A loader and the lowest libraries are built together and agree
     // between them on how a program's own storage is laid out, so the
     // installed system's programs are loaded by the installed system's
-    // loader rather than by the older one a recovery carries.
-    let loader = Path::new(EARLY_LOADER);
-    let from = bundle(RUNTIME_BUNDLE)?
-        .map(|at| at.join(BUNDLE_LOADER))
-        .filter(|p| p.is_file())
-        .with_context(|| format!("the installed system carries no {RUNTIME_BUNDLE}, which holds the loader its own programs ask for"))?;
-    let dir = loader.parent().expect("the loader is in a directory");
-    fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
-    // Made under the recovery's own umask the folder is root's alone, and
-    // the programs that ask for this loader run as the users their init
-    // scripts name: as the system's own folder is, it is open to all.
-    fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .with_context(|| format!("open {} to every user", dir.display()))?;
-    if loader.exists() {
-        fs::remove_file(loader).with_context(|| format!("take away {}", loader.display()))?;
+    // loader rather than by the older one a recovery carries. A phone whose
+    // bundle cannot be opened here still has the recovery's own loader, and
+    // what the directory needs below — its description — does not depend on
+    // it, so a bundle that will not open must not leave the services unable
+    // to register at all.
+    let early = (|| -> Result<()> {
+        let loader = Path::new(EARLY_LOADER);
+        let from = bundle(RUNTIME_BUNDLE)?
+            .map(|at| at.join(BUNDLE_LOADER))
+            .filter(|p| p.is_file())
+            .with_context(|| format!("the installed system carries no {RUNTIME_BUNDLE}, which holds the loader its own programs ask for"))?;
+        let dir = loader.parent().expect("the loader is in a directory");
+        fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+        // Made under the recovery's own umask the folder is root's alone, and
+        // the programs that ask for this loader run as the users their init
+        // scripts name: as the system's own folder is, it is open to all.
+        fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .with_context(|| format!("open {} to every user", dir.display()))?;
+        if loader.exists() {
+            fs::remove_file(loader).with_context(|| format!("take away {}", loader.display()))?;
+        }
+        std::os::unix::fs::symlink(&from, loader).with_context(|| format!("point {} at {}", loader.display(), from.display()))?;
+        Ok(())
+    })();
+    if let Err(e) = early {
+        skyward_sys::kmsg(&format!("the installed system's early loader is not used: {e:#}"))?;
     }
-    std::os::unix::fs::symlink(&from, loader).with_context(|| format!("point {} at {}", loader.display(), from.display()))?;
-    let driver = Path::new(HARDWARE_DRIVER);
-    if !driver.exists() {
-        std::os::unix::fs::symlink(HARDWARE_DRIVER_NODE, driver)
-            .with_context(|| format!("point {HARDWARE_DRIVER} at {HARDWARE_DRIVER_NODE}"))?;
+    // The system's own init opens the drivers to every program; a
+    // recovery's, which uses none of them, leaves them root's alone, and
+    // the directory, the vendor's own service directory and the services
+    // that register with them run as the users their init scripts name.
+    // The vendor's directory opens its driver too: without it its daemon
+    // starts and stops at once, leaving every vendor-side registration
+    // unanswered.
+    for (driver, node) in [
+        (Path::new("/dev/binder"), None),
+        (Path::new(HARDWARE_DRIVER), Some(Path::new(HARDWARE_DRIVER_NODE))),
+        (Path::new("/dev/vndbinder"), None),
+    ] {
+        if let Some(node) = node {
+            if !driver.exists() {
+                std::os::unix::fs::symlink(node, driver)
+                    .with_context(|| format!("point {} at {}", driver.display(), node.display()))?;
+            }
+        }
+        fs::set_permissions(driver, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+            .with_context(|| format!("open {} to every program", driver.display()))?;
     }
-    // The system's own init opens the driver to every program, as it does
-    // /dev/binder; a recovery's, which uses none of it, leaves it root's
-    // alone, and the directory and the services that register with it run
-    // as the users their init scripts name.
-    fs::set_permissions(driver, std::os::unix::fs::PermissionsExt::from_mode(0o666))
-        .with_context(|| format!("open {HARDWARE_DRIVER} to every program"))?;
     let from = Path::new(SERVICE_LABELS);
     let into = Path::new(RECOVERY_LABELS).join(from.file_name().expect("a named file"));
     fs::create_dir_all(RECOVERY_LABELS).with_context(|| format!("make {RECOVERY_LABELS}"))?;
@@ -252,12 +272,22 @@ pub fn publish_descriptions(wanted: &[String], files: &[String]) -> Result<usize
         // it has to start again to see these. It comes back knowing nothing
         // of what had registered with it, and nothing registers again by
         // itself, so init starts each of those services again, as the
-        // installed system's init does whenever its directory restarts.
-        let registered = registered()?;
-        let was = crate::services::running(DIRECTORY_PROGRAM);
-        skyward_sys::set_prop("ctl.restart", DIRECTORY_SERVICE).context("have the service directory start again")?;
-        answering_again(was)?;
-        register_again(&registered)?;
+        // installed system's init does whenever its directory restarts. A
+        // recovery's binder need not answer a listing of what has registered
+        // the way a running system's does; the descriptions are already in
+        // place for the services started below, which is what matters, so
+        // this restart is best-effort rather than a reason to keep them all
+        // from ever starting.
+        let restart = (|| -> Result<()> {
+            let registered = registered()?;
+            let was = crate::services::running(DIRECTORY_PROGRAM);
+            skyward_sys::set_prop("ctl.restart", DIRECTORY_SERVICE).context("have the service directory start again")?;
+            answering_again(was)?;
+            register_again(&registered)
+        })();
+        if let Err(e) = restart {
+            skyward_sys::kmsg(&format!("the service directory is not restarted for its new descriptions: {e:#}"))?;
+        }
     }
     Ok(copied)
 }
