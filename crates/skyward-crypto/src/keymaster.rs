@@ -283,7 +283,7 @@ pub fn tag_number(tag: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skyward_binder::hidl::Payload;
+    use skyward_binder::parcel::Payload;
 
     #[test]
     fn the_methods_are_the_ones_the_interface_lists_in_the_order_it_lists_them() {
