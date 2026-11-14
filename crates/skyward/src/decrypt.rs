@@ -167,8 +167,11 @@ pub fn report(credential: Option<&str>, user: u32, clean: bool) -> Result<()> {
         "how the partition is encrypted whole",
         (|| -> Result<String> {
             let entry = entries.first().context("no entry")?;
-            Ok(match skyward_crypto::data::Encryption::of(entry)? {
-                Some(e) => format!("{}, keys the hardware holds: {}", e.cipher, e.wrapped),
+            Ok(match entry.extra("metadata_encryption") {
+                Some(_) => {
+                    let e = skyward_crypto::encryption::Encryption::of(entry)?;
+                    format!("{}, keys the hardware holds: {}", e.cipher, e.wrapped)
+                }
                 None => "not at all: each user's files are encrypted instead".to_string(),
             })
         })(),
