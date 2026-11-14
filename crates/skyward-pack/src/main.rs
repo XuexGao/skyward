@@ -77,6 +77,11 @@ enum Cmd {
         /// The monospaced typeface's licence, which goes with it.
         #[arg(long)]
         mono_license: PathBuf,
+        /// System-partition programs kept in the ramdisk so the recovery
+        /// still reaches the phone's secure world after the system is
+        /// wiped; each file keeps the path it has under this folder.
+        #[arg(long)]
+        hw_bundle: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -161,6 +166,34 @@ fn main() -> Result<()> {
             if rd.find(paths::BOOTSTRAP_LINKER).is_none() {
                 rd.link(paths::BOOTSTRAP_LINKER, paths::LINKER64)?;
             }
+            // The phone's hardware services live on its system partition, which
+            // a user may wipe; keep a small bundle of them in the ramdisk so the
+            // recovery still reaches the secure world afterwards. Each file keeps
+            // the path it has under this folder.
+            if let Some(bundle) = &hw_bundle {
+                fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for e in entries.flatten() {
+                            let p = e.path();
+                            if p.is_dir() {
+                                collect(&p, out);
+                            } else if p.is_file() {
+                                out.push(p);
+                            }
+                        }
+                    }
+                }
+                let mut files: Vec<std::path::PathBuf> = Vec::new();
+                collect(bundle, &mut files);
+                for f in files {
+                    let rel = f.strip_prefix(bundle).expect("under the bundle");
+                    let arc = rel.to_string_lossy().replace('\\', "/");
+                    if rd.find(&arc).is_none() {
+                        rd.add(&arc, 0o755, std::fs::read(f)?)?;
+                    }
+                }
+            }
+
             // On an unlocked device adbd keeps root when ro.secure is 0 and
             // lets any computer in without authorization when ro.adb.secure is
             // 0; init lets a later line of a property file override an earlier
