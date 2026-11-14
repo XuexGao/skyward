@@ -35,6 +35,14 @@ pub mod ramdisk {
     pub const TASK_PROFILES: &str = "system/etc/task_profiles.json";
     /// The init rules that set up file transfer's USB function.
     pub const MTP_RC: &str = "system/etc/init/skyward-mtp.rc";
+    /// The dynamic loader the phone's own programs expect at this path, which
+    /// a recovery built on the stock image lacks; the loader-backed hardware
+    /// services (hwservicemanager, keymaster, gatekeeper) cannot start without
+    /// it, because their ELF interpreter points here.
+    pub const BOOTSTRAP_LINKER: &str = "system/bin/bootstrap/linker64";
+    /// The recovery's own dynamic loader, which stands in for the missing
+    /// bootstrap one so those services can run.
+    pub const LINKER64: &str = "system/bin/linker64";
 
     /// Whether the running root is Skyward's recovery ramdisk.
     pub fn in_recovery() -> bool {
