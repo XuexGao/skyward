@@ -17,7 +17,15 @@ const OBJECT: u32 = u32::from_be_bytes([b's', b'h', b'*', 0x85]);
 
 /// The bytes this address points at sit inside what another address of the
 /// same call points at.
-const INSIDE_ANOTHER: u32 = 1;
+///
+/// The word it goes in holds two flags, and the phone's own reader gives
+/// them these values: the first marks a reference to a buffer rather than a
+/// buffer, and it refuses an address marked that way instead of copying it;
+/// the second is the one that says the bytes sit inside another buffer. A
+/// value of one here is the first of those, which is why every call that
+/// carried a name was answered with the complaint that its argument was
+/// worth nothing.
+const INSIDE_ANOTHER: u32 = 2;
 
 /// How much room an address takes among the values.
 const ADDRESS_BYTES: usize = 40;
@@ -340,8 +348,11 @@ pub fn find<'a>(binder: &'a crate::driver::Binder, interface: &str, instance: &s
     const GET: u32 = 1;
     let directory = binder.directory()?;
     let mut call = Message::call(DIRECTORY);
-    call.text(interface);
-    call.text(instance);
+    // The directory is asked for a service by the one name it was told,
+    // which is the interface and the instance together: asking it for the
+    // two apart finds nothing, because nothing is registered under the
+    // interface alone.
+    call.text(&format!("{interface}/{instance}"));
     // The directory answers only once the daemon that keeps it has taken
     // the driver for its own, and that happens a moment after it starts: a
     // call made before then is refused outright, and the refusal reads the
@@ -513,6 +524,19 @@ mod tests {
         assert_eq!(parts[1].1, 0, "inside the first address of the call");
         assert_eq!(parts[1].2, vec![1, 2, 3]);
         assert_eq!(m.pointed, FRAME_BYTES as u64 + WORD, "both rounded up to a word");
+    }
+
+    /// The flag a buffer carries when it sits inside another is the second
+    /// of the two the word holds, not the first: the first marks a
+    /// reference, and a reader that finds it set takes the address for
+    /// something it must not copy.
+    #[test]
+    fn the_bytes_of_a_buffer_sit_inside_its_frame_under_the_second_flag() {
+        assert_eq!(INSIDE_ANOTHER, 2);
+        let mut m = Message::call("a.b@1.0::IC");
+        m.text("default");
+        assert_eq!(written(&m)[1].0 & 1, 0, "the flag of a reference is not set");
+        assert_eq!(written(&m)[1].0, 2, "the flag of a buffer inside another is");
     }
 
     #[test]
