@@ -1,6 +1,7 @@
-//! USB drives plugged into the phone's port: found among the kernel's
-//! disks by the USB bus they hang from, and shown read only for the files
-//! on them to be read.
+//! Storage carried to the phone from outside: a drive plugged into the
+//! port, which hangs from a USB bus, and a card put in the phone's own
+//! reader, which the kernel marks removable. Both are found among the
+//! kernel's disks and shown read only for the files on them to be read.
 
 use crate::mount;
 use anyhow::{bail, Context, Result};
@@ -50,8 +51,8 @@ impl Drive {
     }
 }
 
-/// The USB drives plugged in that hold anything, by the names of their
-/// disks. A drive pulled out while it is looked at is left out.
+/// The drives plugged in and the cards put in that hold anything, by the
+/// names of their disks. One pulled out while it is looked at is left out.
 pub fn drives() -> Result<Vec<Drive>> {
     drives_in(Path::new(SYS_BLOCK))
 }
@@ -61,7 +62,10 @@ fn drives_in(listed: &Path) -> Result<Vec<Drive>> {
     for entry in fs::read_dir(listed).with_context(|| format!("read {}", listed.display()))? {
         let link = entry.with_context(|| format!("read {}", listed.display()))?.path();
         let Some(device) = present(fs::canonicalize(&link)).with_context(|| format!("follow {}", link.display()))? else { continue };
-        if !on_usb(&device) {
+        // What the phone carries with it, its own storage, is neither
+        // plugged in nor put in: it hangs from the phone's own controller
+        // and the kernel does not call it removable.
+        if !on_usb(&device) && !removable(&link) {
             continue;
         }
         // A card reader with no card in it is a disk of no size.
@@ -97,6 +101,13 @@ fn on_usb(device: &Path) -> bool {
             .is_some_and(|bus| !bus.is_empty() && bus.bytes().all(|b| b.is_ascii_digit())),
         _ => false,
     })
+}
+
+/// Whether the kernel calls a disk removable, which is what a card in the
+/// phone's own reader is: the card reader is wired to the phone and the
+/// card is not, and the kernel marks the disk so.
+fn removable(disk: &Path) -> bool {
+    fs::read_to_string(disk.join("removable")).is_ok_and(|said| said.trim() == "1")
 }
 
 /// The size the kernel gives a disk or partition at `dir`, in 512-byte
@@ -152,6 +163,9 @@ mod tests {
         let dir = root.join("devices").join(path);
         fs::create_dir_all(dir.join("queue")).unwrap();
         fs::write(dir.join("size"), format!("{sectors}\n")).unwrap();
+        // A disk that is not on a USB bus and is not removable is the
+        // phone's own storage; a card's is made removable after this.
+        fs::write(dir.join("removable"), "0\n").unwrap();
         for (k, (part, sectors)) in parts.iter().enumerate() {
             fs::create_dir_all(dir.join(part)).unwrap();
             fs::write(dir.join(part).join("partition"), format!("{}\n", k + 1)).unwrap();
@@ -163,16 +177,22 @@ mod tests {
     }
 
     #[test]
-    fn only_disks_on_a_usb_bus_that_hold_something_are_drives() {
+    fn only_storage_from_outside_that_holds_something_is_a_drive() {
         let root = std::env::temp_dir().join(format!("skyward-usb-{}", std::process::id()));
         disk(&root, "platform/soc/1d84000.ufshc/host0/target0:0:0/0:0:0:0/block/sda", 61_440_000, &[("sda1", 8), ("sda2", 2_048)]);
         disk(&root, "virtual/block/loop0", 2_048, &[]);
         let usb = "platform/soc/a600000.ssusb/a600000.dwc3/xhci-hcd.0.auto/usb1";
         disk(&root, &format!("{usb}/1-1/1-1:1.0/host1/target1:0:0/1:0:0:0/block/sdg"), 60_437_492, &[("sdg2", 60_000_000), ("sdg1", 409_600)]);
         disk(&root, &format!("{usb}/1-2/1-2:1.0/host2/target2:0:0/2:0:0:0/block/sdh"), 0, &[]);
+        // A card in the phone's own reader: no USB bus, but the kernel
+        // calls the disk removable.
+        let card = "platform/soc/7824900.sdhci/mmc_host/mmc1/mmc1:0001/block/mmcblk1";
+        disk(&root, card, 31_000_000, &[("mmcblk1p1", 30_000_000)]);
+        fs::write(root.join("devices").join(card).join("removable"), "1\n").unwrap();
         let found = drives_in(&root.join("block")).unwrap();
         let sdg = Drive { disk: "sdg".into(), parts: vec![("sdg1".into(), 409_600 * 512), ("sdg2".into(), 60_000_000 * 512)] };
-        assert_eq!(found, [sdg], "the phone's storage, a loop device and an empty card reader are left out");
+        let mmc = Drive { disk: "mmcblk1".into(), parts: vec![("mmcblk1p1".into(), 30_000_000 * 512)] };
+        assert_eq!(found, [mmc, sdg], "the phone's storage, a loop device and an empty card reader are left out");
         fs::remove_dir_all(&root).unwrap();
     }
 

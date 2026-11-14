@@ -896,7 +896,7 @@ pub fn install(cx: &Ctx) -> Frame {
     // The drive's page waits for one to be plugged in, and says why one
     // that is cannot be read.
     let usb = match &cx.state.usb_drive {
-        Some(UsbDrive::Shown) => ["选择 U 盘中的更新包或镜像", "選擇 USB 隨身碟中的更新檔或映像檔", "Choose a package or image on the USB drive"],
+        Some(UsbDrive::Shown) => ["选择 U 盘或 SD 卡中的更新包或镜像", "選擇 USB 隨身碟或 SD 卡中的更新檔或映像檔", "Choose a package or image on the USB drive or SD card"],
         Some(UsbDrive::Unreadable(_)) => USB_DRIVE_UNREADABLE,
         None => USB_DRIVE_WANTED,
     };
@@ -3109,11 +3109,11 @@ pub fn choose(cx: &Ctx, place: Place) -> Frame {
     let unreadable;
     let absent = match (place, &s.usb_drive) {
         (Place::UsbDrive, None) => Some((
-            l.pick(["未连接 U 盘", "未連接 USB 隨身碟", "No USB drive"]),
-            l.pick(["通过 OTG 连接 U 盘后，将在此显示其中的文件。", "透過 OTG 連接 USB 隨身碟後，將在此顯示其中的檔案。", "Connect a USB drive through OTG to see its files here."]),
+            l.pick(["未连接 U 盘或 SD 卡", "未連接 USB 隨身碟或 SD 卡", "No USB drive or SD card"]),
+            l.pick(["通过 OTG 连接 U 盘，或插入 SD 卡后，将在此显示其中的文件。", "透過 OTG 連接 USB 隨身碟，或插入 SD 卡後，將在此顯示其中的檔案。", "Connect a USB drive through OTG, or put in an SD card, to see its files here."]),
         )),
         (Place::UsbDrive, Some(UsbDrive::Unreadable(why))) => {
-            unreadable = tr!(l, "请使用 FAT32 或 exFAT 格式的 U 盘。{why}", "請使用 FAT32 或 exFAT 格式的 USB 隨身碟。{why}", "Use a USB drive formatted as FAT32 or exFAT. {why}");
+            unreadable = tr!(l, "请使用 FAT32 或 exFAT 格式的 U 盘或 SD 卡。{why}", "請使用 FAT32 或 exFAT 格式的 USB 隨身碟或 SD 卡。{why}", "Use a USB drive or SD card formatted as FAT32 or exFAT. {why}");
             Some((l.pick(USB_DRIVE_UNREADABLE), unreadable.as_str()))
         }
         _ => None,

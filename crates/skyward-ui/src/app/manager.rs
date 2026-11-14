@@ -8,8 +8,8 @@ pub const USB_DRIVE: &str = "/mnt/usb";
 
 /// What a USB drive plugged in that cannot be read is said to be, and what
 /// is asked for while none is plugged in.
-pub const USB_DRIVE_UNREADABLE: Text = ["无法读取该 U 盘", "無法讀取這個 USB 隨身碟", "This USB drive can't be read"];
-pub const USB_DRIVE_WANTED: Text = ["请通过 OTG 连接 U 盘", "請透過 OTG 連接 USB 隨身碟", "Connect a USB drive through OTG"];
+pub const USB_DRIVE_UNREADABLE: Text = ["无法读取这个 U 盘或 SD 卡", "無法讀取這個 USB 隨身碟或 SD 卡", "This USB drive or SD card can't be read"];
+pub const USB_DRIVE_WANTED: Text = ["请通过 OTG 连接 U 盘，或插入 SD 卡", "請透過 OTG 連接 USB 隨身碟，或插入 SD 卡", "Connect a USB drive through OTG, or put in an SD card"];
 
 /// Where a file to install is chosen from, and where backups go and are
 /// found.
