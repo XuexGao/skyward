@@ -87,10 +87,10 @@ jobs:
             test -f "devices/$DEVICE.toml"
             echo "devices=$(jq -nc --arg device "$DEVICE" '[$device]')" >> "$GITHUB_OUTPUT"
           else
-            # The devices whose stock recovery is an image of its own, as the
-            # phones whose maker hands out no package a tool can read.
-            names=$(for f in devices/*.toml; do if grep -q '^image = ' "$f"; then basename -s .toml "$f"; fi; done)
-            echo "devices=$(printf '%s\n' "$names" | jq -R -s -c 'split("\n") | map(select(length > 0))')" >> "$GITHUB_OUTPUT"
+            # Only the A57 is built by default: the R9s shares a kernel tree
+            # with it but is built separately, and rebuilding it here just
+            # lengthens every A57-only change. Pass device=r9s to build it.
+            echo "devices=$(jq -nc --arg device a57 '[$device]')" >> "$GITHUB_OUTPUT"
           fi
 
   kernel:
