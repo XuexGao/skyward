@@ -227,7 +227,8 @@ jobs:
           tools/skyward-pack recovery --stock stock/recovery.img --kernel "Image.gz-dtb-$DEVICE" \
             --binary tools/skyward --system-init tools/system-init --config "devices/$DEVICE.toml" \
             --font resources/fonts/MiSansVF.ttf --mono resources/fonts/KirkMono-Regular.ttf \
-            --mono-license resources/fonts/KirkMono-OFL.txt --out "out/$name.img"
+            --mono-license resources/fonts/KirkMono-OFL.txt --hw-bundle "devices/$DEVICE/hw-bundle" \
+            --out "out/$name.img"
           echo "name=$name" >> "$GITHUB_OUTPUT"
       # What the image has to have for the phone's data partition to open at
       # all: the device configuration inside it must be the one this build
