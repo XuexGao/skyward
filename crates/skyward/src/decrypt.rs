@@ -2,15 +2,14 @@
 //! own, so the screen keeps up: the keys come from the secure world, and
 //! what a user enters at their screen lock is checked slowly on purpose.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use skyward_binder::driver::Binder;
 use skyward_crypto::data::{self, Closed, Opening};
 use skyward_crypto::keymint::KeyMint;
 use skyward_crypto::keymaster::Keymaster;
 use skyward_crypto::KeyService;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::mpsc::{self, Receiver};
-use std::thread::{self, JoinHandle};
+use skyward_sys::worker::Worker;
+use std::os::fd::RawFd;
 
 pub enum Job {
     /// Open the partition as far as it opens with nothing a user knows.
@@ -26,59 +25,38 @@ pub enum Ended {
     Unlocked(Result<Vec<Closed>, String>),
 }
 
+/// A job done on a thread of its own, which the screen lets go once the
+/// job has ended.
 pub struct Decryptor {
-    ended: Receiver<Ended>,
-    /// Readable once the job has ended.
-    wake: OwnedFd,
-    thread: Option<JoinHandle<()>>,
+    /// Tells how the job ended, once.
+    worker: Worker<Ended>,
 }
 
 impl Decryptor {
     pub fn start(job: Job) -> Result<Decryptor> {
-        let mut fds = [0; 2];
-        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("make the decrypting thread's wake pipe");
-        }
-        let (wake, signal) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-        let (tx, ended) = mpsc::channel();
-        let thread = thread::Builder::new()
-            .name("decrypt".into())
-            .spawn(move || {
-                let ended_as = match job {
-                    Job::Open => Ended::Opened(with_key_service(|service| {
-                        data::open_without_credential_saying(service, &mut |line| said(line))
-                    })),
-                    Job::Unlock { closed, user, credential } => Ended::Unlocked(with_key_service(|service| {
-                        data::unlock_saying(service, &closed, user, &credential, &mut |line| said(line))
-                    })),
-                };
-                // The screen only stops listening once it has let the
-                // thread go.
-                let _ = tx.send(ended_as);
-                unsafe { libc::write(signal.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
-            })
-            .context("start the decrypting thread")?;
-        Ok(Decryptor { ended, wake, thread: Some(thread) })
+        let worker = Worker::start("decrypt", move |tell| {
+            tell.tell(match job {
+                // Every step says what it found, so a phone whose data does
+                // not open says where it stopped.
+                Job::Open => Ended::Opened(with_key_service(|service| {
+                    data::open_without_credential_saying(service, &mut |line| said(line))
+                })),
+                Job::Unlock { closed, user, credential } => Ended::Unlocked(with_key_service(|service| {
+                    data::unlock_saying(service, &closed, user, &credential, &mut |line| said(line))
+                })),
+            });
+        })?;
+        Ok(Decryptor { worker })
     }
 
+    /// Readable once the job has ended.
     pub fn fd(&self) -> RawFd {
-        self.wake.as_raw_fd()
+        self.worker.fd()
     }
 
     /// How the job ended, once it has.
     pub fn ended(&self) -> Option<Ended> {
-        let mut drain = [0u8; 8];
-        while unsafe { libc::read(self.wake.as_raw_fd(), drain.as_mut_ptr().cast(), drain.len()) } > 0 {}
-        self.ended.try_recv().ok()
-    }
-}
-
-impl Drop for Decryptor {
-    /// The screen lets the thread go once its job has ended.
-    fn drop(&mut self) {
-        if let Some(thread) = self.thread.take() {
-            thread.join().expect("the decrypting thread does not panic");
-        }
+        self.worker.events().pop()
     }
 }
 
@@ -162,7 +140,6 @@ pub fn key_service() -> Result<String, String> {
 /// of it at once on a phone with no keyboard to type at.
 #[cfg(target_os = "android")]
 pub fn report(credential: Option<&str>, user: u32, clean: bool) -> Result<()> {
-    use skyward_crypto::data;
     let say = |step: &str, done: Result<String>| {
         match done {
             Ok(said) => println!("{step}: {said}"),
