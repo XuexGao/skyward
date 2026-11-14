@@ -311,6 +311,16 @@ pub struct Parameter {
     pub bytes: Option<Vec<u8>>,
 }
 
+/// Says something in the one place there is to say it: the kernel's own
+/// log, which is still there when nothing else is running to keep one.
+#[cfg(target_os = "android")]
+fn tell_kernel(line: &str) {
+    use std::io::Write;
+    if let Ok(mut log) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
+        let _ = writeln!(log, "skyward: {line}");
+    }
+}
+
 /// The hardware service serving `interface` as `instance`, or `None` while
 /// nothing has registered it.
 #[cfg(target_os = "android")]
@@ -325,7 +335,31 @@ pub fn find<'a>(binder: &'a crate::driver::Binder, interface: &str, instance: &s
     let mut call = Message::call(DIRECTORY);
     call.text(interface);
     call.text(instance);
-    let reply = directory.transact(GET, &call).with_context(|| format!("look up {interface}/{instance}"))?;
+    // The directory answers only once the daemon that keeps it has taken
+    // the driver for its own, and that happens a moment after it starts: a
+    // call made before then is refused outright, and the refusal reads the
+    // same as an answer that nothing has registered. Make the call again
+    // for a while before believing it, and keep what the driver said.
+    let reply = {
+        let mut tries = 0;
+        loop {
+            match directory.transact(GET, &call) {
+                Ok(reply) => break reply,
+                Err(e) => {
+                    tries += 1;
+                    tell_kernel(&format!(
+                        "look up {interface}/{instance} was refused on try {tries}: {e:#}; the call carries {} bytes over {} addresses",
+                        call.values().len(),
+                        call.addresses().len()
+                    ));
+                    if tries == 5 {
+                        return Err(e).with_context(|| format!("look up {interface}/{instance}"));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+    };
     let mut read = Answer::new(reply.bytes());
     read.status().with_context(|| format!("look up {interface}/{instance}"))?;
     match read.object().with_context(|| format!("read what the directory answered for {interface}"))? {
