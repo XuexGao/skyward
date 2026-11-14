@@ -45,7 +45,6 @@ const TAG_BLOCK_MODE: u32 = KIND_ENUM | 4;
 const TAG_PADDING: u32 = KIND_ENUM | 6;
 const TAG_APPLICATION_ID: u32 = KIND_BYTES | 601;
 const TAG_NONCE: u32 = KIND_BYTES | 1001;
-const TAG_AUTH_TOKEN: u32 = KIND_BYTES | 1002;
 const TAG_MAC_LENGTH: u32 = KIND_UINT | 1003;
 
 /// The tag stripped of the kind of value it carries, which is how the same
@@ -110,14 +109,21 @@ impl<'a> Keymaster<'a> {
         let reply = self.device.transact(GET_KEY_CHARACTERISTICS, &call).context("ask what the key may be used for")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("ask what the key may be used for")?;
-        let mut out = Vec::new();
-        // What the key may be used for comes as one structure holding two
-        // lists: what software checks, and what the secure world checks.
-        let end = read.structure().context("read what the key may be used for")?;
-        for _ in 0..2 {
-            out.extend(read.parameters().context("read what the key may be used for")?);
+        let code = read.i32().context("read whether the key may be used")?;
+        if code != 0 {
+            bail!("the key service answered {code} for what the key may be used for");
         }
-        read.go(end).context("step to the end of what the key may be used for")?;
+        // What the key may be used for is one structure holding two lists:
+        // what software checks, and what the secure world checks. The
+        // counts stand at the same places in each of the two frames.
+        let header = read.pointed().context("read what the key may be used for")?;
+        if header.len() < 2 * FRAME_BYTES {
+            bail!("what the key may be used for is {} bytes", header.len());
+        }
+        let software = u32::from_le_bytes(header[8..12].try_into().expect("four bytes")) as usize;
+        let secure = u32::from_le_bytes(header[24..28].try_into().expect("four bytes")) as usize;
+        let mut out = read_parameters_of(&mut read, software).context("read what software checks")?;
+        out.extend(read_parameters_of(&mut read, secure).context("read what the secure world checks")?);
         Ok(out)
     }
 
@@ -138,47 +144,41 @@ impl<'a> Keymaster<'a> {
     pub fn upgrade(&self, key_blob: &[u8], app_id: &[u8]) -> Result<Vec<u8>> {
         let mut call = Message::call(SERVICE);
         call.bytes(key_blob);
-        let params = [(TAG_APPLICATION_ID, Value::Bytes(app_id))];
+        let params = [Param { tag: TAG_APPLICATION_ID, number: 0, bytes: app_id }];
         write_parameters(&mut call, &params);
         let reply = self.device.transact(UPGRADE_KEY, &call).context("renew the key")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("renew the key")?;
-        Ok(read.pointed().context("read the renewed key")?.to_vec())
+        let code = read.i32().context("read whether the key was renewed")?;
+        if code != 0 {
+            bail!("the key service answered {code} for the renewed key");
+        }
+        read.bytes().context("read the renewed key")
     }
 
     /// Open a decryption with the key service and keep hold of it.
     fn begin(&self, key_blob: &[u8], app_id: &[u8], nonce: &[u8], note: Option<&Token>) -> Result<Handle<'a>> {
-        let token = note.map(token_bytes);
-        let mut params = vec![
-            (TAG_BLOCK_MODE, Value::Enum(BLOCK_MODE_GCM)),
-            (TAG_PADDING, Value::Enum(PADDING_NONE)),
-            (TAG_MAC_LENGTH, Value::Uint(GCM_TAG_BITS)),
-        ];
-        if !app_id.is_empty() {
-            params.push((TAG_APPLICATION_ID, Value::Bytes(app_id)));
-        }
-        params.push((TAG_NONCE, Value::Bytes(nonce)));
-        // A key guarded by the screen lock takes the note the secure world
-        // wrote when it was answered; one that is not guarded takes none.
-        if let Some(token) = &token {
-            params.push((TAG_AUTH_TOKEN, Value::Bytes(token)));
-        }
-        params.push((TAG_PURPOSE, Value::Enum(PURPOSE_DECRYPT)));
-
+        let params = gcm_parameters(app_id, nonce);
         let mut call = Message::call(SERVICE);
         call.u32(PURPOSE_DECRYPT);
         call.bytes(key_blob);
         write_parameters(&mut call, &params);
+        // A key guarded by the screen lock takes the note the secure world
+        // wrote when it was answered; one that is not guarded takes an empty
+        // one, which is a note all the same.
+        write_note(&mut call, note);
 
         // The decryption the service opens outlives the reply that named
         // it, so take a share of it before the reply's room goes back.
         let reply = self.device.transact(BEGIN, &call).context("start a decryption")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("start a decryption")?;
-        let end = read.structure().context("read what the key service answered")?;
-        read.parameters().context("read how the decryption is set up")?;
-        read.go(end).context("step to the end of what the key service answered")?;
+        let code = read.i32().context("read whether a decryption was opened")?;
+        if code != 0 {
+            bail!("the key service answered {code} for the decryption it was asked to open");
+        }
         let handle = read.number().context("read the decryption the key service opened")?;
+        read_parameters(&mut read).context("read how the decryption is set up")?;
         match handle {
             0 => bail!("the key service opened no decryption"),
             h => Ok(Handle::hold(reply.binder(), u32::try_from(h).context("the decryption's number")?)?),
@@ -190,16 +190,22 @@ impl<'a> Keymaster<'a> {
         call.u64(operation.number() as u64);
         write_parameters(&mut call, &[]);
         call.bytes(input);
+        write_note(&mut call, None);
         let reply = operation.transact(UPDATE, &call).context("feed the decryption")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("feed the decryption")?;
-        let taken = read.count().context("read how much the decryption took")?;
+        let code = read.i32().context("read whether the decryption took what it was given")?;
+        if code != 0 {
+            bail!("the key service answered {code} for what it was given to decrypt");
+        }
+        read_parameters(&mut read).context("read how the decryption is set up")?;
+        let taken = read.i32().context("read how much the decryption took")?;
         if taken as usize != input.len() {
             bail!("the decryption took {taken} of the {} bytes it was given", input.len());
         }
-        let end = read.structure().context("read how the decryption is set up")?;
-        read.go(end).context("step to the end of what the decryption answered")?;
-        Ok(read.pointed().context("read what the decryption gave back")?.to_vec())
+        // A decryption whose tag is checked at the end gives nothing back
+        // until then, so what it took is all this call answers with.
+        Ok(Vec::new())
     }
 
     fn finish(&self, operation: &Handle) -> Result<Vec<u8>> {
@@ -208,12 +214,16 @@ impl<'a> Keymaster<'a> {
         write_parameters(&mut call, &[]);
         call.bytes(&[]);
         call.bytes(&[]);
+        write_note(&mut call, None);
         let reply = operation.transact(FINISH, &call).context("close the decryption")?;
         let mut read = Answer::new(reply.bytes());
         read.status().context("close the decryption, which is where a wrong key is refused")?;
-        let end = read.structure().context("read how the decryption is set up")?;
-        read.go(end).context("step to the end of what the decryption answered")?;
-        Ok(read.pointed().context("read what the decryption ended with")?.to_vec())
+        let code = read.i32().context("read whether the decryption closed")?;
+        if code != 0 {
+            bail!("the key service answered {code} for the decryption it had to close");
+        }
+        read_parameters(&mut read).context("read how the decryption is set up")?;
+        read.bytes().context("read what the decryption ended with")
     }
 
     /// Whether the secure world will unwrap the key at all: a decryption is
@@ -225,53 +235,141 @@ impl<'a> Keymaster<'a> {
         let mut call = Message::call(SERVICE);
         call.u64(operation.number() as u64);
         let reply = operation.transact(ABORT, &call).context("drop the decryption")?;
-        Answer::new(reply.bytes()).status().context("drop the decryption")
-    }
-}
-
-/// What a parameter carries. The kind of value it is decides which arm the
-/// interface's union writes.
-#[derive(Clone, Copy)]
-enum Value<'a> {
-    Enum(u32),
-    Uint(u32),
-    Bytes(&'a [u8]),
-}
-
-/// Write a list of parameters: how many there are, then each as a structure
-/// of its own, so that the far side can step over what it does not know.
-fn write_parameters(call: &mut Message, params: &[(u32, Value<'_>)]) {
-    call.u32(params.len() as u32);
-    for (tag, value) in params {
-        let at = call.mark();
-        call.u32(0);
-        call.u32(*tag);
-        match value {
-            Value::Enum(v) | Value::Uint(v) => call.u32(*v),
-            Value::Bytes(b) => call.bytes(b),
+        let mut read = Answer::new(reply.bytes());
+        read.status().context("drop the decryption")?;
+        let code = read.i32().context("read whether the decryption was dropped")?;
+        if code != 0 {
+            bail!("the key service answered {code} for the decryption it was asked to drop");
         }
-        call.fill(at);
+        Ok(())
     }
 }
 
-/// The note the secure world wrote, as the older interface takes it: the
-/// numbers it says, then the time as a structure of its own, then the
-/// signature over all of it.
-fn token_bytes(note: &Token) -> Vec<u8> {
-    // The note is the secure world's own structure, read the same way
-    // whether it is checked or handed over: the first three numbers in the
-    // order this machine uses, and the kind of answer and the time in the
-    // order the network uses. It is packed, so nothing is padded, and the
-    // fields follow one another exactly.
-    let mut out = Vec::new();
-    out.push(0u8);
-    out.extend_from_slice(&note.challenge.to_le_bytes());
-    out.extend_from_slice(&note.user.to_le_bytes());
-    out.extend_from_slice(&note.authenticator.to_le_bytes());
-    out.extend_from_slice(&(note.kind as u32).to_be_bytes());
-    out.extend_from_slice(&note.when.to_be_bytes());
-    out.extend_from_slice(&note.mac);
-    out
+/// How much room one parameter takes in the array the service reads: the
+/// tag, the number its union arm holds, and the pointer and length of the
+/// bytes when the arm carries bytes.
+const PARAMETER_BYTES: usize = 32;
+
+/// How far into a parameter its pointer to those bytes stands.
+const PARAMETER_POINTER_OFFSET: usize = 16;
+
+/// A frame says where a run of things is and how many there are.
+const FRAME_BYTES: usize = 16;
+
+/// How far into a note its pointer to the signature stands, and how much
+/// room the note itself takes: the three numbers it says, the kind of
+/// answer and the time, and then the pointer and length of the signature.
+const NOTE_POINTER_OFFSET: usize = 40;
+const NOTE_BYTES: usize = 56;
+
+/// What one parameter carries: the tag that says what it is, the number the
+/// union arm holds, and the bytes for the arms that carry bytes.
+struct Param<'a> {
+    tag: u32,
+    number: u64,
+    bytes: &'a [u8],
+}
+
+/// Write a list of parameters the way the interface carries one: the array
+/// of structures, and then, for each structure that points at bytes, the
+/// bytes it points at, named against the place inside that structure where
+/// its pointer stands.
+fn write_parameters(call: &mut Message, params: &[Param<'_>]) {
+    let mut array = Vec::with_capacity(params.len() * PARAMETER_BYTES);
+    let mut held: Vec<(u64, usize)> = Vec::with_capacity(params.len());
+    for param in params {
+        let length = param.bytes.len();
+        let at = if length == 0 { 0 } else { call.stash(param.bytes.to_vec()) };
+        held.push((at, length));
+        array.extend_from_slice(&param.tag.to_le_bytes());
+        array.extend_from_slice(&[0; 4]);
+        array.extend_from_slice(&param.number.to_le_bytes());
+        array.extend_from_slice(&at.to_le_bytes());
+        array.extend_from_slice(&(length as u32).to_le_bytes());
+        array.extend_from_slice(&[0; 4]);
+    }
+    let at = if array.is_empty() { 0 } else { call.stash(array) };
+    let list = call.vec_from(at, params.len(), params.len() * PARAMETER_BYTES);
+    for (index, (at, length)) in held.into_iter().enumerate() {
+        call.embedded(at, length, list, (index * PARAMETER_BYTES + PARAMETER_POINTER_OFFSET) as u64);
+    }
+}
+
+/// The parameters a decryption under a nonce takes, in the order the
+/// interface's own library writes them.
+fn gcm_parameters<'a>(app_id: &'a [u8], nonce: &'a [u8]) -> Vec<Param<'a>> {
+    let mut params = vec![
+        Param { tag: TAG_BLOCK_MODE, number: BLOCK_MODE_GCM as u64, bytes: &[] },
+        Param { tag: TAG_PADDING, number: PADDING_NONE as u64, bytes: &[] },
+        Param { tag: TAG_MAC_LENGTH, number: GCM_TAG_BITS as u64, bytes: &[] },
+    ];
+    if !app_id.is_empty() {
+        params.push(Param { tag: TAG_APPLICATION_ID, number: 0, bytes: app_id });
+    }
+    params.push(Param { tag: TAG_NONCE, number: 0, bytes: nonce });
+    params.push(Param { tag: TAG_PURPOSE, number: PURPOSE_DECRYPT as u64, bytes: &[] });
+    params
+}
+
+/// Read a list of parameters whose length a frame before it gives.
+fn read_parameters(read: &mut Answer) -> Result<Vec<Parameter>> {
+    let frame = read.pointed().context("read the frame of a list of parameters")?;
+    if frame.len() < FRAME_BYTES {
+        bail!("a list of parameters says it is {} bytes", frame.len());
+    }
+    let count = u32::from_le_bytes(frame[8..12].try_into().expect("four bytes")) as usize;
+    read_parameters_of(read, count)
+}
+
+/// Read `count` parameters: the array of structures, then the bytes each
+/// one points at.
+fn read_parameters_of(read: &mut Answer, count: usize) -> Result<Vec<Parameter>> {
+    let array = read.pointed().context("read a list of parameters")?;
+    if array.len() < count * PARAMETER_BYTES {
+        bail!("a list of parameters is {} bytes for {count} of them", array.len());
+    }
+    let mut out = Vec::with_capacity(count);
+    for index in 0..count {
+        let at = index * PARAMETER_BYTES;
+        let tag = u32::from_le_bytes(array[at..at + 4].try_into().expect("four bytes"));
+        let number = u64::from_le_bytes(array[at + 8..at + 16].try_into().expect("eight bytes"));
+        let pointed = read.pointed().context("read what a parameter points at")?;
+        let (carried, bytes) = match tag >> 28 {
+            // A big number and a run of bytes are the bytes themselves.
+            8 | 9 => (pointed.len() as i64, Some(pointed.to_vec())),
+            // A long and a date are the whole number; the rest are a word.
+            5 | 6 | 10 => (number as i64, None),
+            _ => (number as u32 as i32 as i64, None),
+        };
+        out.push(Parameter { tag: tag & TAG_NUMBER, number: Some(carried), bytes: bytes.filter(|b| !b.is_empty()) });
+    }
+    Ok(out)
+}
+
+/// Write the note the secure world wrote, as the interface carries one: the
+/// numbers it says and the time, then the signature over all of it, named
+/// against the place inside the note where its pointer stands.
+fn write_note(call: &mut Message, note: Option<&Token>) {
+    let signature = note.map(|t| t.mac.as_slice()).unwrap_or(&[]);
+    let length = signature.len();
+    let at = if length == 0 { 0 } else { call.stash(signature.to_vec()) };
+    let mut buf = Vec::with_capacity(NOTE_BYTES);
+    match note {
+        Some(t) => {
+            buf.extend_from_slice(&t.challenge.to_le_bytes());
+            buf.extend_from_slice(&t.user.to_le_bytes());
+            buf.extend_from_slice(&t.authenticator.to_le_bytes());
+            buf.extend_from_slice(&(t.kind as u32).to_le_bytes());
+            buf.extend_from_slice(&[0; 4]);
+            buf.extend_from_slice(&t.when.to_le_bytes());
+        }
+        None => buf.resize(NOTE_POINTER_OFFSET, 0),
+    }
+    buf.extend_from_slice(&at.to_le_bytes());
+    buf.extend_from_slice(&(length as u32).to_le_bytes());
+    buf.extend_from_slice(&[0; 4]);
+    let parent = call.buffer(buf);
+    call.embedded(at, length, parent, NOTE_POINTER_OFFSET as u64);
 }
 
 /// The number a tag carries, without the kind of value it is.
@@ -308,35 +406,43 @@ mod tests {
         assert_eq!(TAG_MAC_LENGTH, 0x3000_03eb);
         assert_eq!(TAG_APPLICATION_ID, 0x9000_0259);
         assert_eq!(TAG_NONCE, 0x9000_03e9);
-        assert_eq!(TAG_AUTH_TOKEN, 0x9000_03ea);
-        for tag in [TAG_PURPOSE, TAG_BLOCK_MODE, TAG_PADDING, TAG_MAC_LENGTH, TAG_APPLICATION_ID, TAG_NONCE, TAG_AUTH_TOKEN] {
+        for tag in [TAG_PURPOSE, TAG_BLOCK_MODE, TAG_PADDING, TAG_MAC_LENGTH, TAG_APPLICATION_ID, TAG_NONCE] {
             assert_eq!(tag_number(tag), tag & 0x0fff_ffff, "the number it carries, without its kind");
         }
     }
 
-    /// A parameter is written as a structure of its own, so the far side can
-    /// step over one it does not know: that it is there, how long its own
-    /// fields are, the tag, and the value.
+    /// One parameter takes thirty-two bytes of the array, and says where
+    /// its bytes stand sixteen bytes into its own.
     #[test]
-    fn a_parameter_is_written_as_a_structure_of_its_own() {
+    fn a_parameter_says_where_its_bytes_stand() {
+        assert_eq!(PARAMETER_BYTES, 32);
+        assert_eq!(PARAMETER_POINTER_OFFSET, 16);
         let mut call = Message::call(SERVICE);
-        write_parameters(&mut call, &[(TAG_BLOCK_MODE, Value::Enum(BLOCK_MODE_GCM))]);
-        let values = call.values();
-        let at = SERVICE.len() + 1;
-        let at = at.div_ceil(4) * 4;
-        assert_eq!(u32::from_le_bytes(values[at..at + 4].try_into().unwrap()), 1, "one parameter");
-        assert_eq!(u32::from_le_bytes(values[at + 4..at + 8].try_into().unwrap()), 1, "it is there");
-        assert_eq!(u32::from_le_bytes(values[at + 8..at + 12].try_into().unwrap()), 8, "its own fields are two words");
-        assert_eq!(u32::from_le_bytes(values[at + 12..at + 16].try_into().unwrap()), TAG_BLOCK_MODE);
-        assert_eq!(u32::from_le_bytes(values[at + 16..at + 20].try_into().unwrap()), BLOCK_MODE_GCM);
+        write_parameters(&mut call, &[Param { tag: TAG_BLOCK_MODE, number: BLOCK_MODE_GCM as u64, bytes: &[] }]);
+        assert_eq!(call.addresses().len(), 2, "the array, and the bytes of the one parameter that has none");
     }
 
-    /// The note is the secure world's own packed structure, and the key
-    /// service checks its signature over exactly these bytes: the version,
-    /// three numbers in this machine's order, the kind of answer and the
-    /// time in the network's order, then the signature. Nothing is padded.
+    /// The parameters a decryption under a nonce takes are written in the
+    /// order the interface's own library writes them, and a call for a key
+    /// that is bound to nothing names no application.
     #[test]
-    fn a_note_is_written_as_the_secure_world_holds_it() {
+    fn a_decryption_under_a_nonce_takes_its_parameters_in_order() {
+        let params = gcm_parameters(&[1, 2], &[9; 12]);
+        assert_eq!(params.len(), 6, "a decryption takes six of them");
+        let tags: Vec<u32> = params.iter().map(|p| p.tag).collect();
+        assert_eq!(tags, vec![TAG_BLOCK_MODE, TAG_PADDING, TAG_MAC_LENGTH, TAG_APPLICATION_ID, TAG_NONCE, TAG_PURPOSE]);
+        assert_eq!(params[4].bytes, &[9; 12], "the nonce is carried as bytes");
+        let unbound = gcm_parameters(&[], &[9; 12]);
+        assert!(unbound.iter().all(|p| p.tag != TAG_APPLICATION_ID), "a key bound to nothing names no application");
+    }
+
+    /// The note is one structure and the signature over it: the numbers the
+    /// secure world wrote and the time, then the signature, which the note
+    /// points at from forty bytes in.
+    #[test]
+    fn a_note_is_carried_as_one_structure_and_its_signature() {
+        assert_eq!(NOTE_BYTES, 56);
+        assert_eq!(NOTE_POINTER_OFFSET, 40);
         let note = Token {
             challenge: 0x0807_0605_0403_0201,
             user: 0x1817_1615_1413_1211,
@@ -345,33 +451,11 @@ mod tests {
             when: 0x3837_3635_3433_3231,
             mac: vec![0xAB; 32],
         };
-        let raw = token_bytes(&note);
-        assert_eq!(raw.len(), 1 + 8 + 8 + 8 + 4 + 8 + 32, "packed, and no room taken before anything");
-        assert_eq!(raw[0], 0, "the only layout there is");
-        assert_eq!(i64::from_le_bytes(raw[1..9].try_into().unwrap()), note.challenge, "in this machine's order");
-        assert_eq!(i64::from_le_bytes(raw[9..17].try_into().unwrap()), note.user);
-        assert_eq!(i64::from_le_bytes(raw[17..25].try_into().unwrap()), note.authenticator);
-        assert_eq!(u32::from_be_bytes(raw[25..29].try_into().unwrap()), 1, "the kind of answer, in the network's order");
-        assert_eq!(i64::from_be_bytes(raw[29..37].try_into().unwrap()), note.when, "and so is the time");
-        assert_eq!(&raw[37..], &[0xAB; 32]);
-    }
-
-    /// What is written is what is read back: the two halves of the note
-    /// agree, so a note taken from the credential service is handed to the
-    /// key service unchanged.
-    #[test]
-    fn a_note_read_from_the_credential_service_is_written_out_as_it_came() {
-        let raw: Vec<u8> = [
-            vec![0u8],
-            7i64.to_le_bytes().to_vec(),
-            0x253c_22c3_acbb_a741u64.to_le_bytes().to_vec(),
-            9i64.to_le_bytes().to_vec(),
-            1i32.to_be_bytes().to_vec(),
-            1_700_000_000i64.to_be_bytes().to_vec(),
-            vec![0x5A; 32],
-        ]
-        .concat();
-        let note = Token::of(&raw).expect("a note the secure world wrote");
-        assert_eq!(token_bytes(&note), raw, "handed over byte for byte");
+        let mut call = Message::call(SERVICE);
+        write_note(&mut call, Some(&note));
+        assert_eq!(call.addresses().len(), 2, "the note, then the signature it points at");
+        let mut without = Message::call(SERVICE);
+        write_note(&mut without, None);
+        assert_eq!(without.addresses().len(), 2, "a note nobody wrote is still a note, all zeroes");
     }
 }

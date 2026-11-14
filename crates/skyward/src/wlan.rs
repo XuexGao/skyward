@@ -691,18 +691,60 @@ pub(crate) fn place(file: &Firmware) -> Result<()> {
     let to = Path::new(FIRMWARE).join(&file.name);
     let dir = to.parent().expect("a firmware file is in a folder");
     fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+    // Where it was looked for, so that a file none of them holds is a line
+    // naming every place rather than the last one tried.
+    let mut tried: Vec<String> = Vec::new();
     let bytes = match &file.partition {
-        None => fs::read(&file.path).with_context(|| format!("read {}", file.path))?,
+        None => {
+            let mut found = None;
+            for path in file.places() {
+                match fs::read(path) {
+                    Ok(bytes) => {
+                        found = Some(bytes);
+                        break;
+                    }
+                    Err(e) => tried.push(format!("{path}: {e}")),
+                }
+            }
+            found
+        }
         Some(partition) => {
             let at = Path::new(PARTITIONS).join(partition);
             fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
             skyward_block::mount::mount_ro(&Path::new(skyward_block::BY_NAME).join(partition), &at)?;
-            let read = fs::read(at.join(&file.path)).with_context(|| format!("read {} on {partition}", file.path));
+            let mut found = None;
+            for path in file.places() {
+                let inside = at.join(path.trim_start_matches('/'));
+                match fs::read(&inside) {
+                    Ok(bytes) => {
+                        found = Some(bytes);
+                        break;
+                    }
+                    Err(e) => tried.push(format!("{}: {e}", inside.display())),
+                }
+            }
             skyward_block::mount::umount(&at)?;
-            read?
+            found
         }
     };
+    let Some(bytes) = bytes else {
+        bail!("no place holds {}: {}", file.name, tried.join("; "));
+    };
     fs::write(&to, bytes).with_context(|| format!("write {}", to.display()))
+}
+
+/// The supplicant's program: the one the configuration names, or where the
+/// phone's own vendor tree puts it when that path is not there. The image
+/// is packed before the phone is seen, and the R9s and the A57 were built
+/// from vendor trees that do not agree on where it stands.
+fn supplicant_program(cfg: &Config) -> Result<String> {
+    const ELSEWHERE: [&str; 3] =
+        ["/system/bin/hw/wpa_supplicant", "/vendor/bin/wpa_supplicant", "/system/bin/wpa_supplicant"];
+    let found = std::iter::once(cfg.supplicant.as_str())
+        .chain(ELSEWHERE)
+        .find(|p| Path::new(p).is_file())
+        .with_context(|| format!("no wpa_supplicant at {} nor at {}", cfg.supplicant, ELSEWHERE.join(", ")))?;
+    Ok(found.to_owned())
 }
 
 /// Start the supplicant on the interface, and wait for its control socket.
@@ -726,12 +768,13 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     if let Some(dir) = libraries {
         path.push(dir.to_string_lossy().into_owned());
     }
+    let program = supplicant_program(cfg)?;
     // The supplicant says nothing on the recovery's own log, and what it
     // says is the only account of why it did not come up: it is kept beside
     // its settings, and read out when it does not answer.
     let log = home.join(LOG);
     let said = fs::File::create(&log).with_context(|| format!("write {}", log.display()))?;
-    let mut child = Process::new(&cfg.supplicant)
+    let mut child = Process::new(&program)
         .args(["-i", &cfg.interface, "-D", &cfg.driver, "-c"])
         .arg(&settings)
         .env("LD_LIBRARY_PATH", path.join(":"))
@@ -740,7 +783,7 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
         .stdout(Stdio::null())
         .stderr(Stdio::from(said))
         .spawn()
-        .with_context(|| format!("start {}", cfg.supplicant))?;
+        .with_context(|| format!("start {program}"))?;
     let until = Instant::now() + SOCKET_WAIT;
     while !socket.exists() {
         if let Some(status) = child.try_wait().context("look at wpa_supplicant")? {

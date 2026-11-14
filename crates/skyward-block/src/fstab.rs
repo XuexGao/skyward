@@ -117,14 +117,36 @@ pub fn device_at(mount_point: &str) -> Result<String> {
 /// it, and say where. Whatever shows there already, as what an earlier run
 /// of the recovery service mounted does, is taken as it is.
 pub fn mount(name: &str) -> Result<PathBuf> {
-    let entry = partition(name)?.with_context(|| format!("the phone's own table does not mount {name}"))?;
+    let mut entries = partition(name)?.into_iter().chain(partition_every(name)?).collect::<Vec<_>>();
+    entries.dedup();
+    let entry = entries
+        .first()
+        .with_context(|| format!("the phone's own table does not mount {name}"))?
+        .clone();
+    mount_entry(&entry)?;
+    Ok(PathBuf::from(&entry.mount_point))
+}
+
+/// Mount the partition `name` where the phone's own table mounts it, trying
+/// every filesystem the table says it might hold: a phone that names two,
+/// as this one names f2fs and ext4 for the same data, has been formatted
+/// with the one further down, and the first would refuse to mount.
+fn mount_entry(entry: &Entry) -> Result<()> {
     let at = PathBuf::from(&entry.mount_point);
     if crate::mount::is_mount_point(&at)? {
-        return Ok(at);
+        return Ok(());
     }
     std::fs::create_dir_all(&at).with_context(|| format!("make {}", at.display()))?;
-    crate::mount::mount(Path::new(&device(&entry)?), &at, &entry.filesystem, &entry.options)?;
-    Ok(at)
+    crate::mount::mount(Path::new(&device(entry)?), &at, &entry.filesystem, &entry.options)
+}
+
+/// Every entry of the table that names the partition `name`, not only the
+/// first one.
+fn partition_every(name: &str) -> Result<Vec<Entry>> {
+    Ok(table()?
+        .into_iter()
+        .filter(|e| names(e, name))
+        .collect())
 }
 
 #[cfg(test)]

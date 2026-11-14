@@ -184,10 +184,23 @@ pub struct Firmware {
     /// Where the file is: a path in the running recovery, or from the top
     /// of `partition`.
     pub path: String,
+    /// Where else it may be, tried in order when `path` is not there. The
+    /// same vendor tree lays its WLAN calibration out under the board's
+    /// number on one phone and flat on another, and a recovery cannot tell
+    /// which before it has the phone in front of it.
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
     /// A partition the recovery does not keep mounted, which is mounted
     /// read-only while the file is read.
     #[serde(default)]
     pub partition: Option<String>,
+}
+
+impl Firmware {
+    /// Every place the file may be, the one the configuration names first.
+    pub fn places(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.path.as_str()).chain(self.fallbacks.iter().map(String::as_str))
+    }
 }
 
 /// The phone maker's update server, which the stock updater asks about the
@@ -663,6 +676,17 @@ impl DeviceConfig {
                     }
                     None => ensure!(path.is_absolute(), "[wlan] firmware: {} is not an absolute path", file.path),
                 }
+                // Every place it may be is held to the same rule as the one
+                // the configuration names: from the top of the partition,
+                // or absolute in the running recovery.
+                for elsewhere in &file.fallbacks {
+                    if file.partition.is_some() {
+                        let plain = Path::new(elsewhere).components().all(|c| matches!(c, std::path::Component::Normal(_)));
+                        ensure!(plain && !elsewhere.is_empty(), "[wlan] firmware: {elsewhere} is not a path from the top of the partition");
+                    } else {
+                        ensure!(Path::new(elsewhere).is_absolute(), "[wlan] firmware: {elsewhere} is not an absolute path");
+                    }
+                }
             }
         }
         Ok(cfg)
@@ -688,13 +712,12 @@ mod tests {
             assert_eq!(cfg.device.codename, codename);
             assert!(!cfg.device.ab, "the phone keeps one system, not two slots");
             let paths: Vec<&str> = cfg.services.iter().map(|s| s.path.as_str()).collect();
-            // The A57 keeps a copy of the directory in its own ramdisk so
-            // it can still open /data after the system partition is wiped;
-            // the R9s reads its installed system's copy instead.
-            let directory = match codename {
-                "a57" => "/system/bin/hwservicemanager",
-                _ => "/mnt/system/bin/hwservicemanager",
-            };
+            // Both phones keep a copy of the directory in their own ramdisk
+            // (devices/<codename>/hw-bundle), so they can still open /data
+            // after the installed system's partition is wiped. The copy is
+            // reached as /system/bin, which is the recovery's own tree, not
+            // the installed system's /mnt/system.
+            let directory = "/system/bin/hwservicemanager";
             for want in [
                 directory,
                 "/vendor/bin/vndservicemanager",

@@ -191,6 +191,10 @@ fn main() -> Result<()> {
             // recovery still reaches the secure world afterwards. Each file keeps
             // the path it has under this folder.
             if let Some(bundle) = &hw_bundle {
+                // A phone whose configuration points at a program in the
+                // bundle has to have the bundle: packing without it makes an
+                // image that only says what it lacks after it is flashed.
+                ensure!(bundle.is_dir(), "{} is not a folder; the recovery needs the programs in it", bundle.display());
                 fn collect(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
                     if let Ok(entries) = std::fs::read_dir(dir) {
                         for e in entries.flatten() {
