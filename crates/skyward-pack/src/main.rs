@@ -120,7 +120,7 @@ fn main() -> Result<()> {
             img.kernel = BootImage::read(&kernel)?.kernel;
             write(&out, &img, &img.to_bytes()?)
         }
-        Cmd::Recovery { stock, kernel, binary, system_init, config, font, mono, mono_license, out } => {
+        Cmd::Recovery { stock, kernel, binary, system_init, config, font, mono, mono_license, hw_bundle, out } => {
             let mut img = BootImage::read(&stock)?;
             let mut rd = Ramdisk::decode(&img.ramdisk)?;
             // A stock recovery ramdisk has no third-party tree; refuse to build
