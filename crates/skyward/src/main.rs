@@ -531,6 +531,19 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
             skyward_sys::kmsg(&format!("{node} is {}", inside.display()))?;
         }
     }
+    // init gives these nodes their mode as ueventd reads its rules, and a
+    // recovery runs none of them: binderfs makes the vendor directory's
+    // node with a mode only root may open, so the daemon the vendor
+    // services register with, which runs as its own user, starts and stops
+    // at once. Give every one of them what init would.
+    for node in ["/dev/binder", "/dev/hwbinder", "/dev/vndbinder"] {
+        let at = Path::new(node);
+        if at.exists() {
+            if let Err(e) = std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o666)) {
+                skyward_sys::kmsg(&format!("{node} keeps the mode binderfs gave it: {e:#}"))?;
+            }
+        }
+    }
     let services: Vec<_> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().collect();
     // The drivers ask for their firmware by name, and the kernel looks only
     // in folders of its own unless told to pass on what it does not find
