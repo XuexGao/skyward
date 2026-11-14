@@ -89,10 +89,15 @@ ready_property = "hwservicemanager.ready"
 user = "root"
 groups = ["root"]
 
-# The two services below hold the keys and check screen locks, and both
-# register with the directory above: the vendor directory's own daemon is
-# not needed for them, and this phone's kernel keeps its driver for good
-# once a daemon there has gone, so nothing could start on it again.
+# The directory the vendor partition's own hardware services register
+# with, which is a second one beside the rest of the phone's, and which the
+# two services below register into. A recovery carries none of it either.
+[[service]]
+path = "/vendor/bin/vndservicemanager"
+args = ["/dev/vndbinder"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "system"
+groups = ["system", "readproc"]
 
 # The secure world is reached from the system through these, and without
 # them the data partition cannot be opened: the daemon below registers the
