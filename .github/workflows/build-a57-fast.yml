@@ -71,11 +71,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release download "$KERNEL_RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
-            -p "Image.gz-dtb-${{ inputs.device }}" || {
-            echo "::error::no cached kernel at release $KERNEL_RELEASE_TAG; run build-oppo.yml once first"
-            exit 1
-          }
+          # The kernel travels between runs as an artifact of the last
+          # successful full build; only the recovery itself is rebuilt here.
+          run_id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow build-oppo.yml --status success --limit 1 \
+            --json databaseId -q '.[0].databaseId')
+          gh run download "$run_id" -R "$GITHUB_REPOSITORY" -n "kernel-${{ inputs.device }}"
           test -f "Image.gz-dtb-${{ inputs.device }}"
       - name: Read the stock build the recovery is made on
         id: stock
