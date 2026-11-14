@@ -539,7 +539,7 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     for node in ["/dev/binder", "/dev/hwbinder", "/dev/vndbinder"] {
         let at = Path::new(node);
         if at.exists() {
-            if let Err(e) = std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o666)) {
+            if let Err(e) = std::fs::set_permissions(at, std::os::unix::fs::PermissionsExt::from_mode(0o666)) {
                 skyward_sys::kmsg(&format!("{node} keeps the mode binderfs gave it: {e:#}"))?;
             }
         }
