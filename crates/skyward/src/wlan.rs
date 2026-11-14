@@ -34,6 +34,9 @@ const PARTITIONS: &str = "/skyward/wlan";
 /// recovery service's own folder.
 const HOME: &str = "/skyward/run/supplicant";
 
+/// The supplicant's own log, beside its settings, in that folder.
+const LOG: &str = "wpa_supplicant.log";
+
 /// The user the supplicant takes on as it starts, who has to be able to
 /// make its socket.
 const WIFI: u32 = 1010;
@@ -635,12 +638,50 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
             fs::write(&w.path, &w.value).with_context(|| format!("write {} to {}", w.value, w.path))?;
         }
         let until = Instant::now() + INTERFACE_WAIT;
-        while !net.exists() {
-            ensure!(Instant::now() < until, "the driver made no {} in {} seconds", cfg.interface, INTERFACE_WAIT.as_secs());
+        while !net.exists() && Instant::now() < until {
             thread::sleep(Duration::from_millis(100));
         }
+        // What the phone says is read only once the waiting is over: the
+        // lines are a walk of /proc and of the kernel's list of interfaces,
+        // which is not worth doing two hundred times.
+        ensure!(
+            net.exists(),
+            "the driver made no {} in {} seconds{}",
+            cfg.interface,
+            INTERFACE_WAIT.as_secs(),
+            why_no_interface()
+        );
+        skyward_sys::kmsg(&format!("the driver made {}", net.display()))?;
     }
     iface::set_up(&cfg.interface, true)
+}
+
+/// What the phone says when the driver made no interface. A WLAN that does
+/// not come up is almost always one of three things, and each is a line
+/// here rather than a guess: the interfaces there are, the node the daemon
+/// that boots the chip needs, and whether that daemon runs at all.
+fn why_no_interface() -> String {
+    let interfaces: Vec<String> = fs::read_dir("/sys/class/net")
+        .map(|listed| listed.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    let control: Vec<String> = ["/dev/wcnss_ctrl", "/dev/wcnss_wlan"].into_iter().filter(|p| Path::new(p).exists()).map(str::to_owned).collect();
+    let booting = if runs("wcnss_service") { "running" } else { "not running" };
+    format!(" (interfaces: {}; chip's control node: {}; wcnss_service: {booting})", names(interfaces), names(control))
+}
+
+/// The names there are, or that there are none.
+fn names(list: Vec<String>) -> String {
+    if list.is_empty() { "none".to_owned() } else { list.join(" ") }
+}
+
+/// Whether a program of this name runs, as the kernel lists them.
+fn runs(name: &str) -> bool {
+    fs::read_dir("/proc").is_ok_and(|listed| {
+        listed.flatten().any(|entry| {
+            entry.file_name().to_string_lossy().parse::<u32>().is_ok()
+                && fs::read_to_string(entry.path().join("comm")).is_ok_and(|comm| comm.trim() == name)
+        })
+    })
 }
 
 /// Put a file the driver asks for where the firmware loader looks. The
@@ -685,6 +726,11 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
     if let Some(dir) = libraries {
         path.push(dir.to_string_lossy().into_owned());
     }
+    // The supplicant says nothing on the recovery's own log, and what it
+    // says is the only account of why it did not come up: it is kept beside
+    // its settings, and read out when it does not answer.
+    let log = home.join(LOG);
+    let said = fs::File::create(&log).with_context(|| format!("write {}", log.display()))?;
     let mut child = Process::new(&cfg.supplicant)
         .args(["-i", &cfg.interface, "-D", &cfg.driver, "-c"])
         .arg(&settings)
@@ -692,17 +738,17 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(said))
         .spawn()
         .with_context(|| format!("start {}", cfg.supplicant))?;
     let until = Instant::now() + SOCKET_WAIT;
     while !socket.exists() {
         if let Some(status) = child.try_wait().context("look at wpa_supplicant")? {
-            bail!("wpa_supplicant ended as it started: {status}");
+            bail!("wpa_supplicant ended as it started: {status}{}", last_words(&log));
         }
         if Instant::now() >= until {
             end(&mut child, None);
-            bail!("wpa_supplicant opened no control socket in {} seconds", SOCKET_WAIT.as_secs());
+            bail!("wpa_supplicant opened no control socket in {} seconds{}", SOCKET_WAIT.as_secs(), last_words(&log));
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -723,4 +769,14 @@ fn end(child: &mut Child, control: Option<&Control>) {
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// The last lines the supplicant wrote, for the reason it did not come up.
+fn last_words(log: &Path) -> String {
+    let Ok(said) = fs::read_to_string(log) else { return String::new() };
+    let lines: Vec<&str> = said.lines().filter(|l| !l.trim().is_empty()).collect();
+    match lines.len() {
+        0 => String::new(),
+        n => format!(" (it said: {})", lines[n.saturating_sub(4)..].join(" | ")),
+    }
 }

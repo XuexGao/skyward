@@ -25,7 +25,7 @@ tempfile = "3.27.0"
 # Takes the stock recovery partition out of a full update package on its
 # server, reading only what that partition takes, and reads the other
 # partitions where they lie in it.
-unpayload = { version = \"0.1.2\", default-features = false, features = [\"http\"] }
+unpayload = { version = "0.1.2", default-features = false, features = ["http"] }
 # Takes the stock recovery image itself from where a maker hands it out,
 # for a phone whose maker hands out no package a tool can read.
 ureq = { version = "=3.5.0", default-features = false, features = ["rustls", "rustls-webpki-roots"] }

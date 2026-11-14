@@ -593,7 +593,13 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     // answered; the WLAN thread places them again harmlessly when it starts.
     if let Some(wlan) = &cfg.wlan {
         for file in &wlan.firmware {
-            wlan::place(file)?;
+            // One file that cannot be read — which is what a partition not
+            // mounted yet looks like — must not keep the recovery from
+            // starting at all: the WLAN thread places them again when the
+            // chip is brought up, and says what it found if it cannot.
+            if let Err(e) = wlan::place(file) {
+                skyward_sys::kmsg(&format!("the WLAN's {} is not placed: {e:#}", file.name))?;
+            }
         }
     }
     for name in &cfg.partitions.mounted {
