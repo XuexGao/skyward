@@ -129,10 +129,11 @@ fn map(service: &dyn KeyService, step: Step) -> Result<(Vec<Entry>, PathBuf, boo
     step(&format!("{MOUNT} is {} holding {}", device, entry.filesystem));
     // A phone whose table names no cipher keeps its filesystem as it lies,
     // and encrypts each user's files instead; only a named cipher is read.
-    let Some(encryption) = matches!(entry.extra("metadata_encryption"), Some(_))
-        .then(|| Encryption::of(entry))
-        .transpose()?
-    else {
+    let encryption = match entry.extra("metadata_encryption") {
+        Some(_) => Some(Encryption::of(entry)?),
+        None => None,
+    };
+    let Some(encryption) = encryption else {
         // Each user's files are encrypted, the filesystem is not.
         step(&format!("{MOUNT} is not encrypted whole: each user's files are encrypted instead"));
         return Ok((entries, PathBuf::from(device), false));
