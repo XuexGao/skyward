@@ -688,8 +688,10 @@ fn bring_up(cfg: &Config, modules: &[PathBuf]) -> Result<()> {
     iface::set_up(&cfg.interface, true)
 }
 
-/// Put a file the driver asks for where the firmware loader looks.
-fn place(file: &Firmware) -> Result<()> {
+/// Put a file the driver asks for where the firmware loader looks. The
+/// WCNSS chip asks for its NV image on its first power-up, long before the
+/// screen can turn the WLAN on, so the recovery places these at boot too.
+pub(crate) fn place(file: &Firmware) -> Result<()> {
     let to = Path::new(FIRMWARE).join(&file.name);
     let dir = to.parent().expect("a firmware file is in a folder");
     fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
@@ -729,7 +731,7 @@ fn start_supplicant(cfg: &Config, libraries: Option<&Path>) -> Result<Child> {
         path.push(dir.to_string_lossy().into_owned());
     }
     let mut child = Process::new(&cfg.supplicant)
-        .args(["-i", &cfg.interface, "-D", "nl80211", "-c"])
+        .args(["-i", &cfg.interface, "-D", &cfg.driver, "-c"])
         .arg(&settings)
         .env("LD_LIBRARY_PATH", path.join(":"))
         .current_dir("/")
