@@ -581,10 +581,10 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot, found: Result<keys::Fou
     // at once. Give every one of them what init would.
     for node in ["/dev/binder", "/dev/hwbinder", "/dev/vndbinder"] {
         let at = Path::new(node);
-        if at.exists() {
-            if let Err(e) = std::fs::set_permissions(at, std::os::unix::fs::PermissionsExt::from_mode(0o666)) {
-                skyward_sys::kmsg(&format!("{node} keeps the mode binderfs gave it: {e:#}"))?;
-            }
+        if at.exists()
+            && let Err(e) = std::fs::set_permissions(at, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+        {
+            skyward_sys::kmsg(&format!("{node} keeps the mode binderfs gave it: {e:#}"))?;
         }
     }
     let services: Vec<Started> = cfg.services.iter().filter(|s| s.runs_on(&props)).cloned().map(Started::from).collect();
