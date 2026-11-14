@@ -87,23 +87,33 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     // A loader and the lowest libraries are built together and agree
     // between them on how a program's own storage is laid out, so the
     // installed system's programs are loaded by the installed system's
-    // loader rather than by the older one a recovery carries.
-    let loader = Path::new(EARLY_LOADER);
-    let from = bundle(RUNTIME_BUNDLE)?
-        .map(|at| at.join(BUNDLE_LOADER))
-        .filter(|p| p.is_file())
-        .with_context(|| format!("the installed system carries no {RUNTIME_BUNDLE}, which holds the loader its own programs ask for"))?;
-    let dir = loader.parent().expect("the loader is in a directory");
-    fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
-    // Made under the recovery's own umask the folder is root's alone, and
-    // the programs that ask for this loader run as the users their init
-    // scripts name: as the system's own folder is, it is open to all.
-    fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .with_context(|| format!("open {} to every user", dir.display()))?;
-    if loader.exists() {
-        fs::remove_file(loader).with_context(|| format!("take away {}", loader.display()))?;
+    // loader rather than by the older one a recovery carries. A phone whose
+    // bundle cannot be opened here still has the recovery's own loader, and
+    // what the directory needs below — its description — does not depend on
+    // it, so a bundle that will not open must not leave the services unable
+    // to register at all.
+    let early = (|| -> Result<()> {
+        let loader = Path::new(EARLY_LOADER);
+        let from = bundle(RUNTIME_BUNDLE)?
+            .map(|at| at.join(BUNDLE_LOADER))
+            .filter(|p| p.is_file())
+            .with_context(|| format!("the installed system carries no {RUNTIME_BUNDLE}, which holds the loader its own programs ask for"))?;
+        let dir = loader.parent().expect("the loader is in a directory");
+        fs::create_dir_all(dir).with_context(|| format!("make {}", dir.display()))?;
+        // Made under the recovery's own umask the folder is root's alone, and
+        // the programs that ask for this loader run as the users their init
+        // scripts name: as the system's own folder is, it is open to all.
+        fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .with_context(|| format!("open {} to every user", dir.display()))?;
+        if loader.exists() {
+            fs::remove_file(loader).with_context(|| format!("take away {}", loader.display()))?;
+        }
+        std::os::unix::fs::symlink(&from, loader).with_context(|| format!("point {} at {}", loader.display(), from.display()))?;
+        Ok(())
+    })();
+    if let Err(e) = early {
+        skyward_sys::kmsg(&format!("the installed system's early loader is not used: {e:#}"))?;
     }
-    std::os::unix::fs::symlink(&from, loader).with_context(|| format!("point {} at {}", loader.display(), from.display()))?;
     let driver = Path::new(HARDWARE_DRIVER);
     if !driver.exists() {
         std::os::unix::fs::symlink(HARDWARE_DRIVER_NODE, driver)
