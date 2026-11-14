@@ -60,9 +60,13 @@ mod android {
             return Err(std::io::Error::last_os_error()).context("ask for a free loop device");
         }
         let path = free_device(number as u32)?;
+        // Opened read-only on purpose: a device opened for writing and then
+        // turned read-only by the status below stops reading altogether on
+        // the older kernels, while one opened read-only reads from the
+        // start. The status still says read-only, which agrees with the
+        // mode the device was opened with, and nothing has to switch.
         let device = File::options()
             .read(true)
-            .write(true)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
         // A device the kernel handed out as free may still carry an old
