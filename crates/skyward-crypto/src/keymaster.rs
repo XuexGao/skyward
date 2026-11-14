@@ -283,6 +283,7 @@ pub fn tag_number(tag: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skyward_binder::hidl::Payload;
 
     #[test]
     fn the_methods_are_the_ones_the_interface_lists_in_the_order_it_lists_them() {
@@ -347,11 +348,11 @@ mod tests {
         let raw = token_bytes(&note);
         assert_eq!(raw.len(), 1 + 8 + 8 + 8 + 4 + 8 + 32, "packed, and no room taken before anything");
         assert_eq!(raw[0], 0, "the only layout there is");
-        assert_eq!(u64::from_le_bytes(raw[1..9].try_into().unwrap()), note.challenge, "in this machine's order");
-        assert_eq!(u64::from_le_bytes(raw[9..17].try_into().unwrap()), note.user);
-        assert_eq!(u64::from_le_bytes(raw[17..25].try_into().unwrap()), note.authenticator);
+        assert_eq!(i64::from_le_bytes(raw[1..9].try_into().unwrap()), note.challenge, "in this machine's order");
+        assert_eq!(i64::from_le_bytes(raw[9..17].try_into().unwrap()), note.user);
+        assert_eq!(i64::from_le_bytes(raw[17..25].try_into().unwrap()), note.authenticator);
         assert_eq!(u32::from_be_bytes(raw[25..29].try_into().unwrap()), 1, "the kind of answer, in the network's order");
-        assert_eq!(u64::from_be_bytes(raw[29..37].try_into().unwrap()), note.when, "and so is the time");
+        assert_eq!(i64::from_be_bytes(raw[29..37].try_into().unwrap()), note.when, "and so is the time");
         assert_eq!(&raw[37..], &[0xAB; 32]);
     }
 
