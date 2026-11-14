@@ -166,7 +166,8 @@ fn controllers() -> Vec<(String, String)> {
 
 /// Show `drive` read only at `at`: the first of its partitions, or its
 /// disk, that holds a filesystem the kernel reads. Gives the partition and
-/// the filesystem shown.pub fn mount(drive: &Drive, at: &Path) -> Result<(String, &'static str)> {
+/// the filesystem shown.
+pub fn mount(drive: &Drive, at: &Path) -> Result<(String, &'static str)> {
     fs::create_dir_all(at).with_context(|| format!("create {}", at.display()))?;
     let mut tried = Vec::new();
     for name in drive.candidates() {
