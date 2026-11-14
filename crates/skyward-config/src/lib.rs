@@ -42,7 +42,7 @@ pub mod ramdisk {
     pub const BOOTSTRAP_LINKER: &str = "system/bin/bootstrap/linker64";
     /// The recovery's own dynamic loader, which stands in for the missing
     /// bootstrap one so those services can run.
-    pub const LINKER64: &str = "system/bin/linker64";
+    pub const LINKER64: &str = "/system/bin/linker64";
 
     /// Whether the running root is Skyward's recovery ramdisk.
     pub fn in_recovery() -> bool {
@@ -1123,3 +1123,4 @@ mod tests {
         assert!(listeners.uses(Path::new("/vendor")));
     }
 }
+
