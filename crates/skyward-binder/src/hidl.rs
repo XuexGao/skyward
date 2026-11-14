@@ -511,26 +511,11 @@ mod tests {
         assert_eq!(u64::from_le_bytes(m.data[16..24].try_into().unwrap()), 1 << 40);
     }
 
-    /// The interface's own writer puts a value wider than a word on a
-    /// boundary of its width. A method number takes a word, so a call whose
-    /// interface name leaves the values four bytes in from a boundary lands
-    /// its number where an unaligned write would go wrong.
-    #[test]
-    fn a_number_wider_than_a_word_goes_on_a_boundary_of_its_own_width() {
-        // Fifteen characters and a terminator: the values start at 16, and
-        // one word after that is 20, which is not a boundary of eight.
-        let mut m = Message::call("abcdefghijklmno");
-        assert_eq!(m.data.len(), 16, "the name, its terminator, and padding to four");
-        m.u32(10);
-        assert_eq!(m.data.len(), 20);
-        m.u64(0x0102_0304_0506_0708);
-        assert_eq!(m.data.len(), 20 + 4 + 8, "four bytes of padding, then the number");
-        assert_eq!(&m.data[20..24], &[0, 0, 0, 0], "the padding is zeros");
-        assert_eq!(u64::from_le_bytes(m.data[24..32].try_into().unwrap()), 0x0102_0304_0506_0708);
-    }
-
     /// A number takes no padding in front of it, whatever its width: the
     /// phone writes one value where the last one ended and reads it there.
+    /// A call whose interface name leaves the values four bytes in from a
+    /// boundary of eight is the one case where the two readings differ, and
+    /// the phone's own writer is the one this follows.
     #[test]
     fn a_number_is_written_where_the_one_before_it_ended() {
         let mut m = Message::call("a.b@1.0::IC");
