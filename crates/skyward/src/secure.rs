@@ -114,17 +114,27 @@ pub fn prepare_hardware_directory(wanted: &[String]) -> Result<()> {
     if let Err(e) = early {
         skyward_sys::kmsg(&format!("the installed system's early loader is not used: {e:#}"))?;
     }
-    let driver = Path::new(HARDWARE_DRIVER);
-    if !driver.exists() {
-        std::os::unix::fs::symlink(HARDWARE_DRIVER_NODE, driver)
-            .with_context(|| format!("point {HARDWARE_DRIVER} at {HARDWARE_DRIVER_NODE}"))?;
+    // The system's own init opens the drivers to every program; a
+    // recovery's, which uses none of them, leaves them root's alone, and
+    // the directory, the vendor's own service directory and the services
+    // that register with them run as the users their init scripts name.
+    // The vendor's directory opens its driver too: without it its daemon
+    // starts and stops at once, leaving every vendor-side registration
+    // unanswered.
+    for (driver, node) in [
+        (Path::new("/dev/binder"), None),
+        (Path::new(HARDWARE_DRIVER), Some(Path::new(HARDWARE_DRIVER_NODE))),
+        (Path::new("/dev/vndbinder"), None),
+    ] {
+        if let Some(node) = node {
+            if !driver.exists() {
+                std::os::unix::fs::symlink(node, driver)
+                    .with_context(|| format!("point {} at {}", driver.display(), node.display()))?;
+            }
+        }
+        fs::set_permissions(driver, std::os::unix::fs::PermissionsExt::from_mode(0o666))
+            .with_context(|| format!("open {} to every program", driver.display()))?;
     }
-    // The system's own init opens the driver to every program, as it does
-    // /dev/binder; a recovery's, which uses none of it, leaves it root's
-    // alone, and the directory and the services that register with it run
-    // as the users their init scripts name.
-    fs::set_permissions(driver, std::os::unix::fs::PermissionsExt::from_mode(0o666))
-        .with_context(|| format!("open {HARDWARE_DRIVER} to every program"))?;
     let from = Path::new(SERVICE_LABELS);
     let into = Path::new(RECOVERY_LABELS).join(from.file_name().expect("a named file"));
     fs::create_dir_all(RECOVERY_LABELS).with_context(|| format!("make {RECOVERY_LABELS}"))?;
