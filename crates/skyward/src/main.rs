@@ -543,7 +543,7 @@ fn bring_up(cfg: &DeviceConfig, slot: skyward_vab::Slot) -> Result<()> {
     // which happens as soon as its daemon starts below — before anyone can
     // turn the WLAN on. Place the WLAN's firmware now so that request is
     // answered; the WLAN thread places them again harmlessly when it starts.
-    for wlan in &cfg.wlan {
+    if let Some(wlan) = &cfg.wlan {
         for file in &wlan.firmware {
             wlan::place(file)?;
         }
