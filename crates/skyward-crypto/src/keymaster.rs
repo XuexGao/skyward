@@ -36,13 +36,16 @@ const ABORT: u32 = 13;
 
 // The tags, as `android.hardware.keymaster@3.0::Tag` numbers them: the kind
 // of value it carries in the top bits, then its own number. The kind is
-// what decides how the value after it is written.
-const KIND_ENUM: u32 = 1 << 28;
+// what decides how the value after it is written. The three below are of
+// the repeatable kind: the interface names `PURPOSE`, `BLOCK_MODE` and
+// `PADDING` as `ENUM_REP`, not `ENUM`, and a service that holds the tag it
+// is given against its own constant would not know them otherwise.
+const KIND_ENUM_REP: u32 = 2 << 28;
 const KIND_UINT: u32 = 3 << 28;
 const KIND_BYTES: u32 = 9 << 28;
-const TAG_PURPOSE: u32 = KIND_ENUM | 1;
-const TAG_BLOCK_MODE: u32 = KIND_ENUM | 4;
-const TAG_PADDING: u32 = KIND_ENUM | 6;
+const TAG_PURPOSE: u32 = KIND_ENUM_REP | 1;
+const TAG_BLOCK_MODE: u32 = KIND_ENUM_REP | 4;
+const TAG_PADDING: u32 = KIND_ENUM_REP | 6;
 const TAG_APPLICATION_ID: u32 = KIND_BYTES | 601;
 const TAG_NONCE: u32 = KIND_BYTES | 1001;
 const TAG_MAC_LENGTH: u32 = KIND_UINT | 1003;
@@ -400,9 +403,9 @@ mod tests {
     /// than a word's worth of number.
     #[test]
     fn a_tag_carries_the_kind_of_its_value_in_its_top_bits() {
-        assert_eq!(TAG_PURPOSE, 0x1000_0001);
-        assert_eq!(TAG_BLOCK_MODE, 0x1000_0004);
-        assert_eq!(TAG_PADDING, 0x1000_0006);
+        assert_eq!(TAG_PURPOSE, 0x2000_0001);
+        assert_eq!(TAG_BLOCK_MODE, 0x2000_0004);
+        assert_eq!(TAG_PADDING, 0x2000_0006);
         assert_eq!(TAG_MAC_LENGTH, 0x3000_03eb);
         assert_eq!(TAG_APPLICATION_ID, 0x9000_0259);
         assert_eq!(TAG_NONCE, 0x9000_03e9);
