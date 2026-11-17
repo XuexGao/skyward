@@ -34,9 +34,11 @@ load = []
 [firmware]
 partition = "modem"
 
-# The WCNSS chip is an old prima/wcnss part: its WLAN driver is built into
-# the kernel (there is no wlan.ko to load), and wpa_supplicant talks to it
-# over WEXT rather than nl80211. wcnss_service (started below) opens
+# The WCNSS chip is an old prima/wcnss part whose WLAN driver is built into
+# the kernel (there is no wlan.ko to load). The driver registers a wiphy
+# (/sys/class/ieee80211/phy1), and the phone's own wpa_supplicant is built
+# with nl80211 alone: given -Dwext it exits 255 without a word, so the
+# supplicant is started with -Dnl80211. wcnss_service (started below) opens
 # /dev/wcnss_ctrl, which boots pronto and downloads the NV calibration
 # image; the WLAN thread then waits for wlan0 and starts the supplicant.
 #
@@ -45,6 +47,17 @@ partition = "modem"
 # board's number is either 16017 (R9s) or 16027 (R9sk), so both are tried.
 [wlan]
 modules = []
+# The prima driver is built into the kernel (there is no .ko to insmod), so
+# init.qcom.rc's `insmod pronto_wlan.ko con_mode=5` never runs, the module
+# parameter stays at its default and the driver is never loaded, so no
+# wlan0 is made. con_mode 0 is the station mode this driver serves; other
+# values register a wlan0 that refuses SIOCSIFFLAGS(IFF_UP) with EINVAL
+# (os error 22). Write it before bringing the interface up.
+#
+# Taken from the A57, which shares this prima/wcnss part and this kernel;
+# downstream Max1937/skyward verified there that 5 gives the EINVAL and 0
+# loads the driver.
+writes = [{ path = "/sys/module/wlan/parameters/con_mode", value = "0" }]
 firmware = [
     { name = "wlan/prima/WCNSS_qcom_wlan_nv.bin", path = "/vendor/firmware/wlan/16017/WCNSS_qcom_wlan_nv.bin", fallbacks = ["/vendor/firmware/wlan/16027/WCNSS_qcom_wlan_nv.bin", "/vendor/firmware/wlan/prima/WCNSS_qcom_wlan_nv.bin"] },
     { name = "wlan/prima/WCNSS_cfg.dat", path = "/vendor/firmware/wlan/prima/WCNSS_cfg.dat" },
@@ -53,7 +66,7 @@ firmware = [
 interface = "wlan0"
 supplicant = "/vendor/bin/hw/wpa_supplicant"
 libraries = ["/system/lib64", "/vendor/lib64"]
-driver = "wext"
+driver = "nl80211"
 service = "android.hardware.wifi.supplicant.ISupplicant/default"
 probe = "http://connect.rom.miui.com/generate_204"
 
@@ -65,9 +78,41 @@ version = "lineage-22.1-20260715"
 image = "https://github.com/BlueyfishReleases/R9s/releases/download/lineage-22.1-20260715-UNOFFICIAL-R9s/recovery.img"
 recovery = "1d021bdc07d5453b119b6e570d1ac9211c9eb357ec8cd79dc653465d8a081d63"
 
+# The old prima/wcnss radio needs the QRTR/QMI transport before its daemon
+# can boot pronto: wcnss_service is a QMI client, and without the name
+# server it waits forever in qmi_client_init_instance and never opens
+# /dev/wcnss_ctrl. The phone's own init.qcom.rc starts these two in class
+# core; a recovery carries none of them.
+#
+# Taken from the A57: downstream Max1937/skyward verified there that
+# without these two pronto stays OFFLINING, and with them it comes ONLINE,
+# the firmware and the NV image load, and wlan0 appears.
+[[service]]
+path = "/vendor/bin/qrtr-ns"
+args = ["-f"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "vendor_qrtr"
+groups = ["vendor_qrtr"]
+capabilities = ["NET_BIND_SERVICE"]
+
+# A program that is not there is skipped with a line in the log, but one
+# that is there and ends badly stops the boot: if this phone's vendor tree
+# has no sec_config and this program fails on it, drop these three lines.
+[[service]]
+path = "/vendor/bin/irsc_util"
+args = ["/vendor/etc/sec_config"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "root"
+groups = ["root"]
+oneshot = true
+
 # The old prima/wcnss radio: this daemon opens /dev/wcnss_ctrl, boots the
 # pronto processor from the images on the modem partition and downloads the
 # NV calibration data. It has to run before anything asks for wlan0.
+#
+# The A57 runs it as system/system,wifi,radio, as its init.target.rc does.
+# The R9s is left as root: root can open a node whose mode was set for a
+# narrower account, so this cannot be the reason WLAN fails to come up.
 [[service]]
 path = "/vendor/bin/wcnss_service"
 libraries = ["/system/lib64", "/vendor/lib64"]
