@@ -38,13 +38,22 @@ load = []
 [firmware]
 partition = "modem"
 
-# The WCNSS chip is an old prima/wcnss part: its WLAN driver is built into
-# the kernel (there is no wlan.ko to load), and wpa_supplicant talks to it
-# over WEXT rather than nl80211. wcnss_service (started below) opens
+# The WCNSS chip is an old prima/wcnss part whose WLAN driver is built into
+# the kernel (there is no wlan.ko to load). The driver registers a wiphy
+# (/sys/class/ieee80211/phy1), and the phone's own wpa_supplicant is built
+# with nl80211 alone: given -Dwext it exits 255 without a word, so the
+# supplicant is started with -Dnl80211. wcnss_service (started below) opens
 # /dev/wcnss_ctrl, which boots pronto and downloads the NV calibration
 # image; the WLAN thread then waits for wlan0 and starts the supplicant.
 [wlan]
 modules = []
+# The prima driver is built into the kernel (there is no .ko to insmod), so
+# init.qcom.rc's `insmod pronto_wlan.ko con_mode=5` never runs, the module
+# parameter stays at its default and the driver is never loaded, so no
+# wlan0 is made. con_mode 0 is the station mode this driver serves; other
+# values register a wlan0 that refuses SIOCSIFFLAGS(IFF_UP) with EINVAL
+# (os error 22). Write it before bringing the interface up.
+writes = [{ path = "/sys/module/wlan/parameters/con_mode", value = "0" }]
 firmware = [
     # The NV image the kernel asks for by this subpath once pronto is up.
     # It lives under the board-id folders in the vendor partition, not where
@@ -56,7 +65,7 @@ firmware = [
 interface = "wlan0"
 supplicant = "/vendor/bin/hw/wpa_supplicant"
 libraries = ["/system/lib64", "/vendor/lib64"]
-driver = "wext"
+driver = "nl80211"
 service = "android.hardware.wifi.supplicant.ISupplicant/default"
 probe = "http://connect.rom.miui.com/generate_204"
 
@@ -68,14 +77,36 @@ version = "lineage-22.1-20260715"
 image = "https://github.com/BlueyfishReleases/A57/releases/download/lineage-22.1-20260715-UNOFFICIAL-A57/recovery.img"
 recovery = "4fb32feb0cea3f1b800a0ea014a45d15bab3dce10846914c32353e97b42d3959"
 
-# The old prima/wcnss radio: this daemon opens /dev/wcnss_ctrl, boots the
-# pronto processor from the images on the modem partition and downloads the
-# NV calibration data. It has to run before anything asks for wlan0.
+# The old prima/wcnss radio needs the QRTR/QMI transport before its daemon
+# can boot pronto: wcnss_service is a QMI client, and without the name
+# server it waits forever in qmi_client_init_instance and never opens
+# /dev/wcnss_ctrl. The phone's own init.qcom.rc starts these two in class
+# core; a recovery carries none of them.
 [[service]]
-path = "/vendor/bin/wcnss_service"
+path = "/vendor/bin/qrtr-ns"
+args = ["-f"]
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "vendor_qrtr"
+groups = ["vendor_qrtr"]
+capabilities = ["NET_BIND_SERVICE"]
+
+[[service]]
+path = "/vendor/bin/irsc_util"
+args = ["/vendor/etc/sec_config"]
 libraries = ["/system/lib64", "/vendor/lib64"]
 user = "root"
 groups = ["root"]
+oneshot = true
+
+# The old prima/wcnss radio: this daemon opens /dev/wcnss_ctrl, boots the
+# pronto processor from the images on the modem partition and downloads the
+# NV calibration data. It has to run before anything asks for wlan0. Its
+# init.target.rc runs it as system in system,wifi,radio, oneshot.
+[[service]]
+path = "/vendor/bin/wcnss_service"
+libraries = ["/system/lib64", "/vendor/lib64"]
+user = "system"
+groups = ["system", "wifi", "radio"]
 
 # The directory the phone's hardware services register with. A recovery
 # carries none of it — it is on the installed system's system partition,
@@ -115,8 +146,8 @@ groups = ["root", "drmrpc"]
 path = "/vendor/bin/hw/android.hardware.keymaster@3.0-service"
 libraries = ["/system/lib64", "/vendor/lib64"]
 ready_hardware_service = "android.hardware.keymaster@3.0::IKeymasterDevice/default"
-user = "root"
-groups = ["root"]
+user = "nobody"
+groups = ["drmrpc"]
 
 [[service]]
 path = "/vendor/bin/hw/android.hardware.gatekeeper@1.0-service"
