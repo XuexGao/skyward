@@ -81,30 +81,28 @@ recovery = "1d021bdc07d5453b119b6e570d1ac9211c9eb357ec8cd79dc653465d8a081d63"
 # The old prima/wcnss radio needs the QRTR/QMI transport before its daemon
 # can boot pronto: wcnss_service is a QMI client, and without the name
 # server it waits forever in qmi_client_init_instance and never opens
-# /dev/wcnss_ctrl. The phone's own init.qcom.rc starts these two in class
-# core; a recovery carries none of them.
+# /dev/wcnss_ctrl. The phone's own init.qcom.rc starts it in class core; a
+# recovery carries none of it.
 #
-# Taken from the A57: downstream Max1937/skyward verified there that
-# without these two pronto stays OFFLINING, and with them it comes ONLINE,
-# the firmware and the NV image load, and wlan0 appears.
+# Taken from the A57, where downstream Max1937/skyward verified that
+# without it pronto stays OFFLINING and with it pronto comes ONLINE, the
+# firmware and the NV image load, and wlan0 appears.
+#
+# The A57 runs it as vendor_qrtr with NET_BIND_SERVICE. This phone runs it
+# as root instead: an account the phone's own passwd may not have is one
+# more thing that can stop the recovery before it draws anything, and root
+# binds the namespace socket just as well.
 [[service]]
 path = "/vendor/bin/qrtr-ns"
 args = ["-f"]
 libraries = ["/system/lib64", "/vendor/lib64"]
-user = "vendor_qrtr"
-groups = ["vendor_qrtr"]
-capabilities = ["NET_BIND_SERVICE"]
 
-# A program that is not there is skipped with a line in the log, but one
-# that is there and ends badly stops the boot: if this phone's vendor tree
-# has no sec_config and this program fails on it, drop these three lines.
-[[service]]
-path = "/vendor/bin/irsc_util"
-args = ["/vendor/etc/sec_config"]
-libraries = ["/system/lib64", "/vendor/lib64"]
-user = "root"
-groups = ["root"]
-oneshot = true
+# irsc_util is left out on purpose. The A57 runs it beside qrtr-ns, but it
+# is a program that runs once and has to end well, and one that ends badly
+# stops the recovery before the screen comes up. If WLAN still does not
+# come up, this is the next thing to put back: path
+# /vendor/bin/irsc_util, args ["/vendor/etc/sec_config"], user root,
+# groups ["root"], oneshot = true.
 
 # The old prima/wcnss radio: this daemon opens /dev/wcnss_ctrl, boots the
 # pronto processor from the images on the modem partition and downloads the

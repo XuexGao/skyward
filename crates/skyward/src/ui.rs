@@ -236,10 +236,16 @@ fn normal_max(max: u32) -> Result<u32> {
         let cell: [u8; 4] = bytes.as_slice().try_into().map_err(|_| anyhow!("{} is not one cell", path.display()))?;
         Ok(u32::from_be_bytes(cell))
     };
-    let (normal, full) = NORMAL_MAX
-        .iter()
-        .find(|(normal, _)| node.join(normal).exists())
-        .with_context(|| format!("panel {name} gives its normal maximum as none of {NORMAL_MAX:?}"))?;
+    // A panel that gives none of these, as the phones this tree builds for
+    // do — their nodes carry only qcom,mdss-dsi-bl-max-level — has no
+    // brightness range above the backlight's own: all of it is the normal
+    // maximum, and the slider spans it. This used to stop the recovery
+    // before it drew anything, which is a screen that stays black, so it is
+    // said in the kernel log instead and the whole range is taken.
+    let Some((normal, full)) = NORMAL_MAX.iter().find(|(normal, _)| node.join(normal).exists()) else {
+        skyward_sys::kmsg(&format!("panel {name} gives none of {NORMAL_MAX:?}; the backlight's whole range is its normal maximum"))?;
+        return Ok(max);
+    };
     let (normal, full) = (cell(normal)?, cell(full)?);
     ensure!(normal > 0 && normal <= full, "panel {name}: normal maximum {normal} out of {full}");
     Ok((f64::from(max) * f64::from(normal) / f64::from(full)).round() as u32)

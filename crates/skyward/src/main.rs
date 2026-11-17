@@ -242,6 +242,23 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // The screen is what a person sees, and it may not come up at all: the
+    // reason the recovery stopped goes to the kernel log, which the phone
+    // keeps in pstore past a restart, so it can still be read afterwards.
+    match start() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Err(told) = skyward_sys::kmsg(&format!("skyward stopped: {e:#}")) {
+                eprintln!("skyward stopped: {e:#}; the kernel log was not written: {told}");
+            }
+            Err(e)
+        }
+    }
+}
+
+/// What the binary does, whether init started it as the recovery service by
+/// its path or as one of the commands it carries.
+fn start() -> Result<()> {
     // init starts the recovery service by path with no arguments.
     let started_as = std::env::args_os().next().unwrap_or_default();
     let name = Path::new(&started_as).file_name().unwrap_or_default();
